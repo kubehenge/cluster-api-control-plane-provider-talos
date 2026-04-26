@@ -10,9 +10,8 @@ import (
 	"testing"
 
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/cluster-api/util/conditions"
 )
 
@@ -28,8 +27,16 @@ func newMachine(name string, mutate func(*clusterv1.Machine)) clusterv1.Machine 
 // markUnhealthy sets the two conditions the MachineHealthCheck controller sets when a machine fails a
 // health check and its remediation is left to the owner.
 func markUnhealthy(m *clusterv1.Machine) {
-	conditions.MarkFalse(m, clusterv1.MachineHealthCheckSucceededCondition, clusterv1.NodeNotFoundReason, clusterv1.ConditionSeverityWarning, "")
-	conditions.MarkFalse(m, clusterv1.MachineOwnerRemediatedCondition, clusterv1.WaitingForRemediationReason, clusterv1.ConditionSeverityWarning, "")
+	conditions.Set(m, metav1.Condition{
+		Type:   clusterv1.MachineHealthCheckSucceededCondition,
+		Status: metav1.ConditionFalse,
+		Reason: clusterv1.MachineHealthCheckNodeDeletedReason,
+	})
+	conditions.Set(m, metav1.Condition{
+		Type:   clusterv1.MachineOwnerRemediatedCondition,
+		Status: metav1.ConditionFalse,
+		Reason: clusterv1.MachineOwnerRemediatedWaitingForRemediationReason,
+	})
 }
 
 func TestRemainingMachines(t *testing.T) {
@@ -44,14 +51,22 @@ func TestRemainingMachines(t *testing.T) {
 	// A machine whose remediation is already done carries the condition set to True, which is a
 	// distinct branch from the condition being absent: both must stay in the set.
 	remediated := newMachine("remediated", func(m *clusterv1.Machine) {
-		conditions.MarkTrue(m, clusterv1.MachineOwnerRemediatedCondition)
+		conditions.Set(m, metav1.Condition{
+			Type:   clusterv1.MachineOwnerRemediatedCondition,
+			Status: metav1.ConditionTrue,
+			Reason: "Remediated",
+		})
 	})
 	// A machine that recovered on its own: the MachineHealthCheck controller sets
 	// MachineHealthCheckSucceeded back to True but leaves MachineOwnerRemediated=False to the owner.
 	// It is healthy again and must stay in the set, or it would be excluded forever.
 	recovered := newMachine("recovered", func(m *clusterv1.Machine) {
 		markUnhealthy(m)
-		conditions.MarkTrue(m, clusterv1.MachineHealthCheckSucceededCondition)
+		conditions.Set(m, metav1.Condition{
+			Type:   clusterv1.MachineHealthCheckSucceededCondition,
+			Status: metav1.ConditionTrue,
+			Reason: clusterv1.MachineHealthCheckSucceededReason,
+		})
 	})
 	healthy := newMachine("healthy", nil)
 
@@ -86,7 +101,7 @@ func TestRemainingMachines(t *testing.T) {
 func TestNodeNamesForMachine(t *testing.T) {
 	withNodeRef := func(nodeName string, addresses ...clusterv1.MachineAddress) clusterv1.Machine {
 		return newMachine("m", func(m *clusterv1.Machine) {
-			m.Status.NodeRef = &corev1.ObjectReference{Name: nodeName}
+			m.Status.NodeRef = clusterv1.MachineNodeReference{Name: nodeName}
 			m.Status.Addresses = addresses
 		})
 	}
@@ -134,7 +149,7 @@ func TestNodeNamesForMachine(t *testing.T) {
 func TestEtcdMembershipVerify(t *testing.T) {
 	withNode := func(name, nodeName string, mutate func(*clusterv1.Machine), addresses ...clusterv1.MachineAddress) clusterv1.Machine {
 		return newMachine(name, func(m *clusterv1.Machine) {
-			m.Status.NodeRef = &corev1.ObjectReference{Name: nodeName}
+			m.Status.NodeRef = clusterv1.MachineNodeReference{Name: nodeName}
 			m.Status.Addresses = addresses
 
 			if mutate != nil {
