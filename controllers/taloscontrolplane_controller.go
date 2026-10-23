@@ -957,7 +957,7 @@ func (r *TalosControlPlaneReconciler) reconcileMachineTemplateState(ctx context.
 	desiredLabels := controlPlaneMachineLabelsForCluster(tcp, cluster.Name)
 	desiredAnnotations := copyStringMap(tcp.Spec.MachineTemplate.ObjectMeta.Annotations)
 	desiredReadinessGates := copyMachineReadinessGates(tcp.Spec.MachineTemplate.Spec.ReadinessGates)
-	desiredDeletionSpec := buildMachineDeletionSpec(tcp.Spec.MachineTemplate.Spec.Deletion)
+	desiredDeletion := tcp.Spec.MachineTemplate.Spec.Deletion
 
 	for i := range machines.Items {
 		machine := &machines.Items[i]
@@ -1001,9 +1001,21 @@ func (r *TalosControlPlaneReconciler) reconcileMachineTemplateState(ctx context.
 			changed = true
 		}
 
-		if !reflect.DeepEqual(machine.Spec.Deletion, desiredDeletionSpec) {
-			machine.Spec.Deletion = desiredDeletionSpec
-			changed = true
+		// Only the timeouts set in the template are enforced: the Machine defaulting webhook sets
+		// nodeDeletionTimeoutSeconds when it is empty, so clearing it would patch every Machine on
+		// every reconcile.
+		for _, timeout := range []struct {
+			machine  **int32
+			template *int32
+		}{
+			{&machine.Spec.Deletion.NodeDrainTimeoutSeconds, desiredDeletion.NodeDrainTimeoutSeconds},
+			{&machine.Spec.Deletion.NodeVolumeDetachTimeoutSeconds, desiredDeletion.NodeVolumeDetachTimeoutSeconds},
+			{&machine.Spec.Deletion.NodeDeletionTimeoutSeconds, desiredDeletion.NodeDeletionTimeoutSeconds},
+		} {
+			if timeout.template != nil && !ptr.Equal(*timeout.machine, timeout.template) {
+				*timeout.machine = copyInt32Pointer(timeout.template)
+				changed = true
+			}
 		}
 
 		if !changed {

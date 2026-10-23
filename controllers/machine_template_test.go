@@ -125,3 +125,77 @@ func TestReconcileMachineTemplateStatePropagatesMachineFieldsInPlace(t *testing.
 		t.Fatalf("expected reconcileMachineTemplateState to avoid mutating infrastructureRef")
 	}
 }
+
+func TestReconcileMachineTemplateStateKeepsDefaultedDeletionTimeouts(t *testing.T) {
+	t.Parallel()
+
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(clusterv1.AddToScheme(scheme))
+	utilruntime.Must(controlplanev1.AddToScheme(scheme))
+
+	cluster := &clusterv1.Cluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "workload-cluster",
+			Namespace: "default",
+		},
+	}
+
+	tcp := &controlplanev1.TalosControlPlane{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "talos-control-plane",
+			Namespace: "default",
+		},
+		Spec: controlplanev1.TalosControlPlaneSpec{
+			MachineTemplate: controlplanev1.TalosControlPlaneMachineTemplate{
+				Spec: controlplanev1.TalosControlPlaneMachineTemplateSpec{
+					Deletion: controlplanev1.TalosControlPlaneMachineTemplateDeletionSpec{
+						NodeDrainTimeoutSeconds: ptr.To[int32](20),
+					},
+				},
+			},
+		},
+	}
+
+	// nodeDeletionTimeoutSeconds as the Machine defaulting webhook sets it when the template leaves it empty
+	machine := &clusterv1.Machine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cp-0",
+			Namespace: "default",
+			Labels:    controlPlaneMachineLabelsForCluster(tcp, cluster.Name),
+		},
+		Spec: clusterv1.MachineSpec{
+			ClusterName: cluster.Name,
+			Deletion: clusterv1.MachineDeletionSpec{
+				NodeDrainTimeoutSeconds:    ptr.To[int32](20),
+				NodeDeletionTimeoutSeconds: ptr.To[int32](10),
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(machine).Build()
+	reconciler := &TalosControlPlaneReconciler{Client: fakeClient}
+
+	original := &clusterv1.Machine{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKeyFromObject(machine), original); err != nil {
+		t.Fatalf("failed to get machine: %v", err)
+	}
+
+	machines := &clusterv1.MachineList{Items: []clusterv1.Machine{*original.DeepCopy()}}
+
+	if err := reconciler.reconcileMachineTemplateState(context.Background(), cluster, tcp, machines); err != nil {
+		t.Fatalf("reconcileMachineTemplateState failed: %v", err)
+	}
+
+	persisted := &clusterv1.Machine{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKeyFromObject(machine), persisted); err != nil {
+		t.Fatalf("failed to get reconciled machine: %v", err)
+	}
+
+	if persisted.ResourceVersion != original.ResourceVersion {
+		t.Fatalf("expected an up to date machine not to be patched, resourceVersion went from %s to %s", original.ResourceVersion, persisted.ResourceVersion)
+	}
+	if persisted.Spec.Deletion.NodeDeletionTimeoutSeconds == nil || *persisted.Spec.Deletion.NodeDeletionTimeoutSeconds != 10 {
+		t.Fatalf("expected the defaulted nodeDeletionTimeout to be kept, got %v", persisted.Spec.Deletion.NodeDeletionTimeoutSeconds)
+	}
+}
