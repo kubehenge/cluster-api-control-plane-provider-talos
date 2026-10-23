@@ -230,7 +230,7 @@ func convertToContractVersionedObjectReference(ref *corev1.ObjectReference) (*cl
 	if ref.APIVersion != "" {
 		gv, err := schema.ParseGroupVersion(ref.APIVersion)
 		if err != nil {
-			return nil, fmt.Errorf("failed to convert object: failed to parse apiVersion: %v", err)
+			return nil, fmt.Errorf("failed to convert object: failed to parse apiVersion: %w", err)
 		}
 		apiGroup = gv.Group
 		// A group without a version is what convertToObjectReference writes when it cannot resolve

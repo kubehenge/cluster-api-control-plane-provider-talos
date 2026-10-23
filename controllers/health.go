@@ -55,7 +55,7 @@ func (r *TalosControlPlaneReconciler) ensureNodesBooted(ctx context.Context, tcp
 
 	defer func() {
 		for _, client := range clients {
-			client.Close() //nolint:errcheck
+			_ = client.Close()
 		}
 	}()
 
