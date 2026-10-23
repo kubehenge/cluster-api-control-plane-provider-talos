@@ -245,5 +245,5 @@ type TalosControlPlaneList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&TalosControlPlane{}, &TalosControlPlaneList{})
+	objectTypes = append(objectTypes, &TalosControlPlane{}, &TalosControlPlaneList{})
 }
