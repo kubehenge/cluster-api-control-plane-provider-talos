@@ -134,9 +134,10 @@ func (suite *IntegrationSuite) SetupSuite() {
 		suite.Require().NoError(encoder.Close())
 	}
 
+	// clusterctl never picks a prerelease by itself, and no stable CABPT release implements the v1beta2 contract yet
 	options := capi.Options{
 		CoreProvider:            env("CORE_PROVIDER", "cluster-api"),
-		BootstrapProviders:      []string{"talos"},
+		BootstrapProviders:      []string{env("BOOTSTRAP_PROVIDER", "talos:v0.7.0-alpha.3")},
 		InfrastructureProviders: []infrastructure.Provider{provider},
 		ControlPlaneProviders:   []string{"talos"},
 		WaitProviderTimeout:     time.Minute,
