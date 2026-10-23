@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/suite"
 	"golang.org/x/sync/errgroup"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -507,6 +508,34 @@ func (suite *ControllersSuite) TestReconcileMigratesLegacyFinalizer() {
 	g.Expect(fakeClient.Get(suite.ctx, util.ObjectKey(tcp), tcp)).To(Succeed())
 	g.Expect(tcp.Finalizers).To(ContainElement(controlplanev1.TalosControlPlaneFinalizer))
 	g.Expect(tcp.Finalizers).NotTo(ContainElement(controlplanev1.TalosControlPlaneFinalizerLegacy))
+}
+
+func (suite *ControllersSuite) TestReconcileDeleteWithLegacyFinalizer() {
+	fakeClient := newFakeClient()
+
+	cluster, tcp, _ := suite.setupCluster(fakeClient, "test-delete-legacy-finalizer", ptr.To[int32](1))
+
+	g := NewWithT(suite.T())
+
+	patchHelper, err := patch.NewHelper(tcp, fakeClient)
+	g.Expect(err).To(BeNil())
+
+	tcp.Finalizers = []string{controlplanev1.TalosControlPlaneFinalizerLegacy}
+	g.Expect(patchHelper.Patch(suite.ctx, tcp)).To(Succeed())
+
+	machine, _ := createMachineNodePair("test-delete-legacy-finalizer-0", cluster, tcp, true, "10.0.0.1")
+	g.Expect(fakeClient.Create(suite.ctx, machine)).To(Succeed())
+
+	g.Expect(fakeClient.Delete(suite.ctx, tcp)).To(Succeed())
+
+	r := newReconciler(rejectNewFinalizersWhileDeleting(fakeClient), withCluster(util.ObjectKey(cluster)))
+
+	_, err = r.Reconcile(suite.ctx, ctrl.Request{NamespacedName: util.ObjectKey(tcp)})
+	g.Expect(err).NotTo(HaveOccurred())
+
+	g.Expect(fakeClient.Get(suite.ctx, util.ObjectKey(tcp), tcp)).To(Succeed())
+	g.Expect(tcp.Finalizers).To(Equal([]string{controlplanev1.TalosControlPlaneFinalizerLegacy}))
+	g.Expect(apierrors.IsNotFound(fakeClient.Get(suite.ctx, util.ObjectKey(machine), &clusterv1.Machine{}))).To(BeTrue())
 }
 
 func (suite *ControllersSuite) TestReconcileInitializeControlPlane() {

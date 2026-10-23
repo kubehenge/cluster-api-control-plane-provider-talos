@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 
@@ -37,16 +38,20 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/cluster-api/controllers/clustercache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
@@ -107,6 +112,57 @@ func newFakeClient(initObjs ...client.Object) client.Client {
 			&controlplanev1.TalosControlPlane{},
 		).
 		Build()
+}
+
+// rejectNewFinalizersWhileDeleting makes the fake client refuse, like the API server does, to add a
+// finalizer to an object that is already being deleted.
+func rejectNewFinalizersWhileDeleting(c client.Client) client.Client {
+	check := func(ctx context.Context, c client.WithWatch, obj client.Object) error {
+		current, ok := obj.DeepCopyObject().(client.Object)
+		if !ok {
+			return fmt.Errorf("unexpected object %T", obj)
+		}
+
+		if err := c.Get(ctx, client.ObjectKeyFromObject(obj), current); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+
+		if current.GetDeletionTimestamp().IsZero() {
+			return nil
+		}
+
+		for _, finalizer := range obj.GetFinalizers() {
+			if !slices.Contains(current.GetFinalizers(), finalizer) {
+				gvk, err := apiutil.GVKForObject(obj, c.Scheme())
+				if err != nil {
+					return err
+				}
+
+				return apierrors.NewInvalid(gvk.GroupKind(), obj.GetName(), field.ErrorList{
+					field.Forbidden(field.NewPath("metadata", "finalizers"), "no new finalizers can be added if the object is being deleted"),
+				})
+			}
+		}
+
+		return nil
+	}
+
+	return interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if err := check(ctx, c, obj); err != nil {
+				return err
+			}
+
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if err := check(ctx, c, obj); err != nil {
+				return err
+			}
+
+			return c.Update(ctx, obj, opts...)
+		},
+	})
 }
 
 func createSecrets(ctx context.Context, obj client.Client, cluster *clusterv1.Cluster, secretsBundle *secrets.Bundle, machineAddress string) error {
