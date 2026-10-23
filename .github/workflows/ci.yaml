@@ -55,10 +55,12 @@ jobs:
       - name: Image and manifests
         if: matrix.target == 'build'
         run: |
-          ref=$(make -s image KO_FLAGS=--push=false TAG=ci | tail -n 1)
-          case $ref in
-            ghcr.io/kubehenge/cluster-api-control-plane-provider-talos@sha256:*) ;;
-            *) echo "::error::ko printed no image digest: $ref"; exit 1 ;;
+          built=$(make -s image KO_FLAGS=--push=false TAG=ci | tail -n 1)
+          # ko prints name:tag@digest; the manifests reference the image by digest alone.
+          case $built in
+            ghcr.io/kubehenge/cluster-api-control-plane-provider-talos:*@sha256:*) ;;
+            *) echo "::error::ko printed no image digest: $built"; exit 1 ;;
           esac
+          ref="ghcr.io/kubehenge/cluster-api-control-plane-provider-talos@${built##*@}"
           make release-manifests CONTROLLER_IMAGE="$ref"
           grep -q "image: $ref" _out/release/control-plane-components.yaml

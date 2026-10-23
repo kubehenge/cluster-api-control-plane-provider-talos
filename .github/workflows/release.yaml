@@ -49,11 +49,13 @@ jobs:
         run: |
           make tools
           echo "$GH_TOKEN" | _out/bin/ko login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          ref=$(make -s image TAG="$GITHUB_REF_NAME" | tail -n 1)
-          case $ref in
-            ghcr.io/kubehenge/cluster-api-control-plane-provider-talos@sha256:*) ;;
-            *) echo "::error::ko printed no image digest: $ref"; exit 1 ;;
+          built=$(make -s image TAG="$GITHUB_REF_NAME" | tail -n 1)
+          # ko prints name:tag@digest; the signature, the manifests and the notes name the digest alone.
+          case $built in
+            ghcr.io/kubehenge/cluster-api-control-plane-provider-talos:*@sha256:*) ;;
+            *) echo "::error::ko printed no image digest: $built"; exit 1 ;;
           esac
+          ref="ghcr.io/kubehenge/cluster-api-control-plane-provider-talos@${built##*@}"
           _out/bin/cosign sign --yes "$ref"
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
           echo "digest=${ref#*@}" >> "$GITHUB_OUTPUT"
