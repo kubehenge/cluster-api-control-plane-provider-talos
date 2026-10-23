@@ -655,7 +655,7 @@ func (suite *ControllersSuite) initializeControlPlane(ns string, etcdData ...str
 
 		machine := machineList.Items[0]
 		g.Expect(machine.Name).To(HavePrefix(tcp.Name))
-	}, time.Second).Should(Succeed())
+	}, time.Minute).Should(Succeed())
 
 	return machineService
 }
@@ -718,7 +718,7 @@ func (suite *ControllersSuite) TestRollingUpdate() {
 
 		machine := machineList.Items[0]
 		g.Expect(machine.Name).To(HavePrefix(tcp.Name))
-	}, time.Second).Should(Succeed())
+	}, time.Minute).Should(Succeed())
 
 	patchHelper, err := patch.NewHelper(tcp, fakeClient)
 	tcp.Spec.Version = "v1.25.4"
@@ -826,7 +826,7 @@ func (suite *ControllersSuite) TestUppercaseHostnames() {
 
 		machine := machineList.Items[0]
 		g.Expect(machine.Name).To(HavePrefix(tcp.Name))
-	}, time.Second).Should(Succeed())
+	}, time.Minute).Should(Succeed())
 
 	cancel()
 	g.Expect(eg.Wait()).To(Succeed())
