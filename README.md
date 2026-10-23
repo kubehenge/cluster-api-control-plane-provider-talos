@@ -7,6 +7,7 @@ A machine leaves etcd at a pre-terminate hook, after Cluster API has drained its
 It works together with the [Cluster API Bootstrap Provider Talos](https://github.com/kubehenge/cluster-api-bootstrap-provider-talos).
 
 This fork is maintained primarily for [Kubehenge](https://kubehenge.dev), and it is open to anyone: issues and pull requests are welcome.
+Report bugs and ask questions in [this repository's issues](https://github.com/kubehenge/cluster-api-control-plane-provider-talos/issues), and security problems privately, as [SECURITY.md](.github/SECURITY.md) describes; [CONTRIBUTING.md](.github/CONTRIBUTING.md) covers pull requests.
 
 ## Compatibility
 
@@ -127,6 +128,7 @@ gh attestation verify control-plane-components.yaml --repo kubehenge/cluster-api
 
 ## Building
 
+The Go module is `github.com/kubehenge/cluster-api-control-plane-provider-talos`.
 Everything builds natively with Go and the tools the Makefile installs into `_out/bin`; `make help` lists the targets.
 
 ```shell
@@ -142,7 +144,7 @@ make image KO_FLAGS=--push=false TAG=dev
 
 This provider was created by [Sidero Labs](https://www.siderolabs.com/), who keep the original at [siderolabs/cluster-api-control-plane-provider-talos](https://github.com/siderolabs/cluster-api-control-plane-provider-talos).
 The Cluster API v1beta2 port builds on their open pull request for it, and the machine lifecycle and remediation build on the work in the community forks of Nick Atkins and Pip Oomen.
-`CHANGELOG.md` holds the history of the Sidero Labs releases.
+[CHANGELOG.md](CHANGELOG.md) lists the changes of this fork's releases and links the history of the Sidero Labs releases.
 
 ## Licence
 
