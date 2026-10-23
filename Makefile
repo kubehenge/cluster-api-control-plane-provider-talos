@@ -1,154 +1,135 @@
-REGISTRY ?= ghcr.io
-USERNAME ?= siderolabs
-SHA ?= $(shell git describe --match=none --always --abbrev=8 --dirty)
-TAG ?= $(shell git describe --tag --always --dirty)
-BRANCH ?= $(shell git rev-parse --abbrev-ref HEAD)
-REGISTRY_AND_USERNAME := $(REGISTRY)/$(USERNAME)
-NAME := cluster-api-control-plane-talos-controller
-WITH_RACE ?= false
-CGO_ENABLED = 0
-TESTPKGS ?= ./controllers/...
+# Everything runs natively with the Go toolchain go.mod names: no container is needed to generate,
+# lint, test or build. Tools are installed into $(BIN) at the versions below; `go install` checks
+# each one against the Go checksum database, so a version pins its content as a digest would.
 
-KRES_IMAGE ?= ghcr.io/siderolabs/kres:latest
-
-CONTROLLER_GEN_VERSION ?= v0.17.0
-CONVERSION_GEN_VERSION ?= v0.32.3
-
-ifneq (, $(filter $(WITH_RACE), t true TRUE y yes 1))
-GO_BUILDFLAGS += -race
-CGO_ENABLED = 1
-GO_LDFLAGS += -linkmode=external -extldflags '-static'
-endif
-
-GO_LDFLAGS += -s -w
-
+REGISTRY ?= ghcr.io/kubehenge
+NAME := cluster-api-control-plane-provider-talos
+IMAGE ?= $(REGISTRY)/$(NAME)
+TAG ?= $(shell git describe --tags --always --dirty)
 ARTIFACTS := _out
+BIN := $(abspath $(ARTIFACTS)/bin)
+PLATFORMS ?= linux/amd64,linux/arm64
 
-TOOLS ?= ghcr.io/siderolabs/tools:v1.14.0
-PKGS ?= v1.14.0
+GO ?= go
+export CGO_ENABLED ?= 0
+export GOFLAGS ?= -trimpath
 
-BUILD := docker buildx build
-PLATFORM ?= linux/amd64
-PROGRESS ?= auto
-PUSH ?= false
-COMMON_ARGS := --file=Dockerfile
-COMMON_ARGS += --progress=$(PROGRESS)
-COMMON_ARGS += --platform=$(PLATFORM)
-COMMON_ARGS += --build-arg=REGISTRY_AND_USERNAME=$(REGISTRY_AND_USERNAME)
-COMMON_ARGS += --build-arg=NAME=$(NAME)
-COMMON_ARGS += --build-arg=TAG=$(TAG)
-COMMON_ARGS += --build-arg=PKGS=$(PKGS)
-COMMON_ARGS += --build-arg=TOOLS=$(TOOLS)
-COMMON_ARGS += --build-arg=GO_BUILDFLAGS="$(GO_BUILDFLAGS)"
-COMMON_ARGS += --build-arg=GO_LDFLAGS="$(GO_LDFLAGS)"
-COMMON_ARGS += --build-arg=CGO_ENABLED="$(CGO_ENABLED)"
-COMMON_ARGS += --build-arg=TESTPKGS="$(TESTPKGS)"
-COMMON_ARGS += --build-arg=CONTROLLER_GEN_VERSION=$(CONTROLLER_GEN_VERSION)
-COMMON_ARGS += --build-arg=CONVERSION_GEN_VERSION=$(CONVERSION_GEN_VERSION)
+# renovate: datasource=go depName=sigs.k8s.io/controller-tools
+CONTROLLER_GEN_VERSION := v0.23.0
+# conversion-gen comes from the Kubernetes minor go.mod builds against, so the generated conversions
+# match the apimachinery they call.
+# renovate: datasource=go depName=k8s.io/code-generator
+CONVERSION_GEN_VERSION := v0.36.5
+# renovate: datasource=go depName=github.com/golangci/golangci-lint/v2
+GOLANGCI_LINT_VERSION := v2.15.0
+# renovate: datasource=go depName=sigs.k8s.io/kustomize/kustomize/v5
+KUSTOMIZE_VERSION := v5.8.3
+# renovate: datasource=go depName=github.com/google/ko
+KO_VERSION := v0.19.1
+# renovate: datasource=go depName=github.com/sigstore/cosign/v3
+COSIGN_VERSION := v3.1.4
+# The Kubernetes API server and etcd the integration tests run on linux/amd64, as CI does; elsewhere
+# set KUBEBUILDER_ASSETS to a directory holding kube-apiserver and etcd of the same release.
+# renovate: datasource=github-release-attachments depName=kubernetes-sigs/controller-tools
+ENVTEST_VERSION := envtest-v1.37.0
+ENVTEST_SHA256 := f03faedfc68d2a78cee5cb02618bb44e7f67044f4c5fc957f72d3307fda61a9c
 
-all: manifests container
+# The suffix `go install` gives binaries on the build platform, so the tool targets find what they built.
+GOEXE := $(shell $(GO) env GOEXE)
+CONTROLLER_GEN := $(BIN)/controller-gen$(GOEXE)
+CONVERSION_GEN := $(BIN)/conversion-gen$(GOEXE)
+GOLANGCI_LINT := $(BIN)/golangci-lint$(GOEXE)
+KUSTOMIZE := $(BIN)/kustomize$(GOEXE)
+KO := $(BIN)/ko$(GOEXE)
+COSIGN := $(BIN)/cosign$(GOEXE)
+ENVTEST_DIR := $(abspath $(ARTIFACTS)/envtest/$(ENVTEST_VERSION))
+# controller-gen is given import paths, never directories: it makes a directory root absolute with
+# filepath.Abs, which on some platforms drops a trailing `...` and leaves only the directory itself.
+MODULE := $(shell $(GO) list -m)
+
+.DEFAULT_GOAL := help
 
 .PHONY: help
-help: ## This help menu.
-	@grep -E '^[a-zA-Z%_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
+help: ## Show the targets.
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "%-20s %s\n", $$1, $$2}'
 
-target-%: ## Builds the specified target defined in the Dockerfile. The build result will remain only in the build cache.
-	@$(BUILD) \
-		--target=$* \
-		$(COMMON_ARGS) \
-		$(TARGET_ARGS) .
+$(CONTROLLER_GEN):
+	GOBIN=$(BIN) $(GO) install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
 
-local-%: ## Builds the specified target defined in the Dockerfile using the local output type. The build result will be output to the specified local destination.
-	@$(MAKE) target-$* TARGET_ARGS="--output=type=local,dest=$(DEST) $(TARGET_ARGS)"
+$(CONVERSION_GEN):
+	GOBIN=$(BIN) $(GO) install k8s.io/code-generator/cmd/conversion-gen@$(CONVERSION_GEN_VERSION)
 
-docker-%: ## Builds the specified target defined in the Dockerfile using the docker output type. The build result will be loaded into docker.
-	@$(MAKE) target-$* TARGET_ARGS="--tag $(REGISTRY_AND_USERNAME)/$(NAME):$(TAG) $(TARGET_ARGS)"
+$(GOLANGCI_LINT):
+	GOBIN=$(BIN) $(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 
-define RELEASEYAML
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-namespace: $(NAMESPACE)
-commonLabels:
-  app: cluster-api-control-plane-provider-talos
-bases:
-  - crd
-  - rbac
-  - manager
-endef
+$(KUSTOMIZE):
+	GOBIN=$(BIN) $(GO) install sigs.k8s.io/kustomize/kustomize/v5@$(KUSTOMIZE_VERSION)
 
-export RELEASEYAML
-.PHONY: init
-init: ## Initialize the project.
-	@mkdir tmp \
-	&& cd tmp \
-	&& kubebuilder init --repo $(REGISTRY_AND_USERNAME)/$(NAME) --domain $(DOMAIN) \
-	&& rm -rf Dockerfile Makefile .gitignore bin hack \
-	&& mv ./* ../ \
-	&& cd .. \
-	&& rm -rf tmp \
-	&& echo "$$RELEASEYAML" > ./config/kustomization.yaml
+$(KO):
+	GOBIN=$(BIN) $(GO) install github.com/google/ko@$(KO_VERSION)
+
+$(COSIGN):
+	GOBIN=$(BIN) $(GO) install github.com/sigstore/cosign/v3/cmd/cosign@$(COSIGN_VERSION)
+
+.PHONY: tools
+tools: $(CONTROLLER_GEN) $(CONVERSION_GEN) $(GOLANGCI_LINT) $(KUSTOMIZE) $(KO) $(COSIGN) ## Install the pinned tools into _out/bin.
 
 .PHONY: generate
-generate: ## Generate source code.
-	@$(MAKE) local-$@ DEST=./ PLATFORM=linux/amd64
-
-.PHONY: container
-container: generate ## Build the container image.
-	@$(MAKE) docker-$@ TARGET_ARGS="--push=$(PUSH)"
+generate: $(CONTROLLER_GEN) $(CONVERSION_GEN) ## Generate deepcopy and conversion code.
+	$(CONTROLLER_GEN) object:headerFile=./hack/boilerplate.go.txt paths=$(MODULE)/api/...
+	$(CONVERSION_GEN) --output-file=zz_generated.conversion.go --go-header-file=./hack/boilerplate.go.txt $(MODULE)/api/v1alpha3
 
 .PHONY: manifests
-manifests: ## Generate manifests (e.g. CRD, RBAC, etc.).
-	@$(MAKE) local-$@ DEST=./ PLATFORM=linux/amd64
+manifests: $(CONTROLLER_GEN) ## Generate the CRDs, webhooks and RBAC rules.
+	$(CONTROLLER_GEN) crd:crdVersions=v1 paths=$(MODULE)/api/... output:crd:dir=config/crd/bases output:webhook:dir=config/webhook webhook
+	$(CONTROLLER_GEN) rbac:roleName=manager-role paths=$(MODULE)/controllers/... output:rbac:dir=config/rbac
 
-.PHONY: release-notes
-release-notes: ## Create the release notes.
-	@mkdir -p $(ARTIFACTS)
-	ARTIFACTS=$(ARTIFACTS) ./hack/release.sh $@ $(ARTIFACTS)/RELEASE_NOTES.md $(TAG)
+.PHONY: check-dirty
+check-dirty: ## Fail when the tree differs from what is committed, as after generate or manifests.
+	@if test -n "`git status --porcelain`"; then echo "Source tree is dirty"; git status; git diff; exit 1; fi
 
-.PHONY: release
-release: manifests container release-notes ## Create the release YAML. The build result will be ouput to the specified local destination.
-	@$(MAKE) local-$@ DEST=./$(ARTIFACTS) PLATFORM=linux/amd64
+.PHONY: lint
+lint: $(GOLANGCI_LINT) ## Run golangci-lint.
+	$(GOLANGCI_LINT) run --allow-serial-runners ./...
 
-.PHONY: deploy
-deploy: manifests ## Deploy to a cluster. This is for testing purposes only.
-	kubectl apply -k config/default
+.PHONY: unit
+unit: ## Run the unit tests under the race detector.
+	mkdir -p $(ARTIFACTS)
+	CGO_ENABLED=1 $(GO) test -race -count=1 -covermode=atomic -coverprofile=$(ARTIFACTS)/coverage.txt ./api/... ./controllers/... ./pkg/...
 
-.PHONY: destroy
-destroy: ## Remove from a cluster. This is for testing purposes only.
-	kubectl delete -k config/default
+$(ENVTEST_DIR)/kube-apiserver:
+	mkdir -p $(ENVTEST_DIR)
+	curl -fsSL --proto '=https' --retry 5 -o $(ENVTEST_DIR)/envtest.tar.gz \
+		https://github.com/kubernetes-sigs/controller-tools/releases/download/$(ENVTEST_VERSION)/$(ENVTEST_VERSION)-linux-amd64.tar.gz
+	echo "$(ENVTEST_SHA256)  $(ENVTEST_DIR)/envtest.tar.gz" | sha256sum -c -
+	tar -xzf $(ENVTEST_DIR)/envtest.tar.gz -C $(ENVTEST_DIR) --strip-components=2
+	rm $(ENVTEST_DIR)/envtest.tar.gz
 
-.PHONY: install
-install: manifests ## Install CRDs into a cluster.
-	kubectl apply -k config/crd
+.PHONY: envtest
+envtest: $(ENVTEST_DIR)/kube-apiserver ## Download the API server and etcd the integration tests run.
 
-.PHONY: uninstall
-uninstall: manifests ## Uninstall CRDs from a cluster.
-	kubectl delete -k config/crd
+.PHONY: integration
+integration: ## Run the integration tests against a local API server (run `make envtest` first, or set KUBEBUILDER_ASSETS).
+	KUBEBUILDER_ASSETS=$${KUBEBUILDER_ASSETS:-$(ENVTEST_DIR)} $(GO) test -count=1 ./internal/integration/...
 
-.PHONY: run
-run: install ## Run the controller locally. This is for testing purposes only.
-	@$(MAKE) docker-container TARGET_ARGS="--load"
-	@docker run --rm -it --net host -v $(PWD):/src -v $(KUBECONFIG):/root/.kube/config -e KUBECONFIG=/root/.kube/config $(REGISTRY_AND_USERNAME)/$(NAME):$(TAG)
+.PHONY: image
+image: $(KO) ## Build the controller image with ko and push it to $(IMAGE); prints IMAGE@digest.
+	KO_DOCKER_REPO=$(IMAGE) $(KO) build --bare --sbom=none --platform=$(PLATFORMS) \
+		--image-label org.opencontainers.image.source=https://github.com/kubehenge/$(NAME) \
+		--image-label org.opencontainers.image.licenses=MPL-2.0 \
+		--tags $(TAG) $(KO_FLAGS) .
+
+.PHONY: release-manifests
+release-manifests: $(KUSTOMIZE) ## Render control-plane-components.yaml and metadata.yaml for CONTROLLER_IMAGE into _out/release.
+	@test -n "$(CONTROLLER_IMAGE)" || { echo "set CONTROLLER_IMAGE to the image reference, by digest"; exit 1; }
+	rm -rf $(ARTIFACTS)/release $(ARTIFACTS)/config
+	mkdir -p $(ARTIFACTS)/release
+	cp -r config $(ARTIFACTS)/config
+	cd $(ARTIFACTS)/config/manager && $(KUSTOMIZE) edit set image controller=$(CONTROLLER_IMAGE)
+	$(KUSTOMIZE) build $(ARTIFACTS)/config/default > $(ARTIFACTS)/release/control-plane-components.yaml
+	cp config/metadata/metadata.yaml $(ARTIFACTS)/release/metadata.yaml
+	rm -rf $(ARTIFACTS)/config
 
 .PHONY: clean
-clean:
-	@rm -rf $(ARTIFACTS)
-
-integration-test-build:
-	@$(MAKE) local-integration-test DEST=./_out/ PLATFORM=linux/amd64
-
-.PHONY: integration-test
-integration-test: integration-test-build
-	@REGISTRY_AND_USERNAME=$(REGISTRY_AND_USERNAME) TAG=$(TAG) NAME=$(NAME) bash hack/test/e2e-aws.sh
-
-.PHONY: unit-tests
-unit-tests:  ## Performs unit tests
-	@$(MAKE) local-$@ DEST=$(ARTIFACTS)
-
-check-dirty: ## Verifies that source tree is not dirty
-	@if test -n "`git status --porcelain`"; then echo "Source tree is dirty"; git status; exit 1 ; fi
-
-.PHONY: rekres
-rekres:
-	@docker pull $(KRES_IMAGE)
-	@docker run --rm --net=host --user $(shell id -u):$(shell id -g) -v $(PWD):/src -w /src -e GITHUB_TOKEN $(KRES_IMAGE)
+clean: ## Remove _out.
+	rm -rf $(ARTIFACTS)

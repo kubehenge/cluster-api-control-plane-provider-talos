@@ -16,9 +16,7 @@ spec:
         control-plane: controller-manager
     spec:
       containers:
-        - command:
-            - /manager
-          args:
+        - args:
             - --enable-leader-election
             - "--diagnostics-address=${CAPI_DIAGNOSTICS_ADDRESS:=:8443}"
             - "--insecure-diagnostics=${CAPI_INSECURE_DIAGNOSTICS:=false}"
@@ -56,7 +54,10 @@ spec:
               drop:
                 - ALL
             privileged: false
+            runAsNonRoot: true
             runAsUser: 65532
             runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
           terminationMessagePolicy: FallbackToLogsOnError
       terminationGracePeriodSeconds: 10

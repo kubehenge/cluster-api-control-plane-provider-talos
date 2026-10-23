@@ -12,9 +12,9 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"slices"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/gobuffalo/flect"
 	"github.com/pkg/errors"
@@ -22,7 +22,6 @@ import (
 	"github.com/siderolabs/crypto/tls"
 	"github.com/siderolabs/crypto/x509"
 	"github.com/siderolabs/gen/xslices"
-	"github.com/siderolabs/talos/pkg/machinery/api/common"
 	"github.com/siderolabs/talos/pkg/machinery/api/machine"
 	"github.com/siderolabs/talos/pkg/machinery/api/storage"
 	"github.com/siderolabs/talos/pkg/machinery/config/generate"
@@ -38,20 +37,24 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
-	"k8s.io/utils/pointer"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
-	"sigs.k8s.io/cluster-api/controllers/remote"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/utils/ptr"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+	"sigs.k8s.io/cluster-api/controllers/clustercache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	controlplanev1 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1alpha3"
+	controlplanev1 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1beta1"
 	"github.com/siderolabs/cluster-api-control-plane-provider-talos/controllers"
 )
 
@@ -81,22 +84,26 @@ func newReconciler(client client.Client, opts ...reconcilerOption) *controllers.
 		opt(&options)
 	}
 
-	var tracker *remote.ClusterCacheTracker
+	var clusterCache clustercache.ClusterCache
 	if options.cluster != nil {
-		tracker = remote.NewTestClusterCacheTracker(logger, client, client, fakeScheme, *options.cluster)
+		clusterCache = clustercache.NewFakeClusterCache(client, *options.cluster)
 	}
 
 	return &controllers.TalosControlPlaneReconciler{
-		Client:    client,
-		Log:       logger,
-		APIReader: client,
-		Tracker:   tracker,
+		Client:       client,
+		Log:          logger,
+		APIReader:    client,
+		ClusterCache: clusterCache,
 	}
 }
 
 func newFakeClient(initObjs ...client.Object) client.Client {
+	objects := make([]client.Object, 0, len(initObjs)+1)
+	objects = append(objects, GenericInfrastructureMachineCRD.DeepCopy())
+	objects = append(objects, initObjs...)
+
 	return fake.NewClientBuilder().
-		WithObjects(initObjs...).
+		WithObjects(objects...).
 		WithScheme(fakeScheme).
 		WithStatusSubresource(
 			&clusterv1.Cluster{},
@@ -104,6 +111,57 @@ func newFakeClient(initObjs ...client.Object) client.Client {
 			&controlplanev1.TalosControlPlane{},
 		).
 		Build()
+}
+
+// rejectNewFinalizersWhileDeleting makes the fake client refuse, like the API server does, to add a
+// finalizer to an object that is already being deleted.
+func rejectNewFinalizersWhileDeleting(c client.Client) client.Client {
+	check := func(ctx context.Context, c client.WithWatch, obj client.Object) error {
+		current, ok := obj.DeepCopyObject().(client.Object)
+		if !ok {
+			return fmt.Errorf("unexpected object %T", obj)
+		}
+
+		if err := c.Get(ctx, client.ObjectKeyFromObject(obj), current); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+
+		if current.GetDeletionTimestamp().IsZero() {
+			return nil
+		}
+
+		for _, finalizer := range obj.GetFinalizers() {
+			if !slices.Contains(current.GetFinalizers(), finalizer) {
+				gvk, err := apiutil.GVKForObject(obj, c.Scheme())
+				if err != nil {
+					return err
+				}
+
+				return apierrors.NewInvalid(gvk.GroupKind(), obj.GetName(), field.ErrorList{
+					field.Forbidden(field.NewPath("metadata", "finalizers"), "no new finalizers can be added if the object is being deleted"),
+				})
+			}
+		}
+
+		return nil
+	}
+
+	return interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if err := check(ctx, c, obj); err != nil {
+				return err
+			}
+
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if err := check(ctx, c, obj); err != nil {
+				return err
+			}
+
+			return c.Update(ctx, obj, opts...)
+		},
+	})
 }
 
 func createSecrets(ctx context.Context, obj client.Client, cluster *clusterv1.Cluster, secretsBundle *secrets.Bundle, machineAddress string) error {
@@ -172,20 +230,19 @@ func createMachineNodePair(name string, cluster *clusterv1.Cluster, tcp *control
 		},
 		Spec: clusterv1.MachineSpec{
 			ClusterName: cluster.Name,
-			InfrastructureRef: corev1.ObjectReference{
-				Kind:       GenericInfrastructureMachineCRD.Kind,
-				APIVersion: GenericInfrastructureMachineCRD.APIVersion,
-				Name:       GenericInfrastructureMachineCRD.Name,
-				Namespace:  GenericInfrastructureMachineCRD.Namespace,
+			InfrastructureRef: clusterv1.ContractVersionedObjectReference{
+				APIGroup: InfrastructureGroupVersion.Group,
+				Kind:     GenericInfrastructureMachineKind,
+				Name:     name,
 			},
-			NodeDeletionTimeout: &metav1.Duration{Duration: 10 * time.Second},
-			Version:             pointer.String("v1.16.6"),
+			Deletion: clusterv1.MachineDeletionSpec{
+				NodeDeletionTimeoutSeconds: ptr.To[int32](10),
+			},
+			Version: "v1.16.6",
 		},
 		Status: clusterv1.MachineStatus{
-			NodeRef: &corev1.ObjectReference{
-				Kind:       "Node",
-				APIVersion: corev1.SchemeGroupVersion.String(),
-				Name:       name,
+			NodeRef: clusterv1.MachineNodeReference{
+				Name: name,
 			},
 			Addresses: clusterv1.MachineAddresses{
 				{
@@ -268,7 +325,7 @@ func MustFormatValue(str string) string {
 
 var (
 	// InfrastructureGroupVersion is group version used for infrastructure objects.
-	InfrastructureGroupVersion = schema.GroupVersion{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta1"}
+	InfrastructureGroupVersion = schema.GroupVersion{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta2"}
 
 	// GenericInfrastructureMachineKind is the Kind for the GenericInfrastructureMachine.
 	GenericInfrastructureMachineKind = "GenericInfrastructureMachine"
@@ -281,11 +338,11 @@ func untypedCRD(gvk schema.GroupVersionKind) *apiextensionsv1.CustomResourceDefi
 	return generateCRD(gvk, map[string]apiextensionsv1.JSONSchemaProps{
 		"spec": {
 			Type:                   "object",
-			XPreserveUnknownFields: pointer.Bool(true),
+			XPreserveUnknownFields: ptr.To(true),
 		},
 		"status": {
 			Type:                   "object",
-			XPreserveUnknownFields: pointer.Bool(true),
+			XPreserveUnknownFields: ptr.To(true),
 		},
 	})
 }
@@ -330,7 +387,7 @@ func generateCRD(gvk schema.GroupVersionKind, properties map[string]apiextension
 }
 
 func startMachineServer(ctx context.Context, secretsBundle *secrets.Bundle) (*machineService, string, error) {
-	listener, err := net.Listen("tcp", "localhost:0")
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "localhost:0")
 	if err != nil {
 		return nil, "", err
 	}
@@ -406,6 +463,9 @@ type machineService struct {
 	etcdMembers         *machine.EtcdMemberListResponse
 	serviceListResponse *machine.ServiceListResponse
 	resetChan           chan struct{}
+	// etcdData is what the etcd data directory holds; bootstrapping fills it, as on Talos.
+	etcdData          []string
+	bootstrapRequests int
 
 	requestsMu               sync.Mutex
 	etcdRemoveMemberRequests []*machine.EtcdRemoveMemberByIDRequest
@@ -420,7 +480,7 @@ func (ms *machineService) getEtcdRemoveMemberRequests() map[uint64]any {
 	})
 }
 
-func (ms *machineService) addSequenceEvents(node string, events ...*machine.SequenceEvent) error {
+func (ms *machineService) addSequenceEvents(events ...*machine.SequenceEvent) error {
 	ms.lock.Lock()
 	defer ms.lock.Unlock()
 
@@ -431,9 +491,6 @@ func (ms *machineService) addSequenceEvents(node string, events ...*machine.Sequ
 		}
 
 		ms.events = append(ms.events, &machine.Event{
-			Metadata: &common.Metadata{
-				Hostname: node,
-			},
 			Data: &anypb.Any{
 				TypeUrl: "talos/runtime/" + string(event.ProtoReflect().Descriptor().FullName()),
 				Value:   data,
@@ -452,7 +509,31 @@ func (ms *machineService) resetSequenceEvents() {
 }
 
 func (ms *machineService) Bootstrap(ctx context.Context, req *machine.BootstrapRequest) (*machine.BootstrapResponse, error) {
+	ms.lock.Lock()
+	defer ms.lock.Unlock()
+
+	if len(ms.etcdData) > 0 {
+		return nil, status.Error(codes.AlreadyExists, "etcd data directory is not empty")
+	}
+
+	ms.bootstrapRequests++
+	ms.etcdData = []string{"member"}
+
 	return &machine.BootstrapResponse{}, nil
+}
+
+func (ms *machineService) setEtcdData(entries ...string) {
+	ms.lock.Lock()
+	defer ms.lock.Unlock()
+
+	ms.etcdData = entries
+}
+
+func (ms *machineService) getBootstrapRequests() int {
+	ms.lock.Lock()
+	defer ms.lock.Unlock()
+
+	return ms.bootstrapRequests
 }
 
 func (ms *machineService) EtcdMemberList(ctx context.Context, req *machine.EtcdMemberListRequest) (*machine.EtcdMemberListResponse, error) {
@@ -466,7 +547,27 @@ func (ms *machineService) EtcdMemberList(ctx context.Context, req *machine.EtcdM
 	return ms.etcdMembers, nil
 }
 
+// List answers for the etcd data directory only, the way Talos walks a directory: the directory itself
+// first, then its entries.
 func (ms *machineService) List(req *machine.ListRequest, serv machine.MachineService_ListServer) error {
+	if req.GetRoot() != constants.EtcdDataPath {
+		return status.Errorf(codes.Unknown, "lstat %s: no such file or directory", req.GetRoot())
+	}
+
+	ms.lock.Lock()
+	entries := slices.Clone(ms.etcdData)
+	ms.lock.Unlock()
+
+	if err := serv.Send(&machine.FileInfo{Name: req.GetRoot(), RelativeName: ".", IsDir: true}); err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if err := serv.Send(&machine.FileInfo{Name: req.GetRoot() + "/" + entry, RelativeName: entry, IsDir: true}); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 

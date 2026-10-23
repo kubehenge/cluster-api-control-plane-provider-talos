@@ -10,8 +10,6 @@ import (
 	"os"
 
 	bootstrapv1alpha3 "github.com/siderolabs/cluster-api-bootstrap-provider-talos/api/v1alpha3"
-	controlplanev1alpha3 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1alpha3"
-	"github.com/siderolabs/cluster-api-control-plane-provider-talos/controllers"
 	"github.com/spf13/pflag"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -23,7 +21,8 @@ import (
 	"k8s.io/component-base/logs"
 	logsv1 "k8s.io/component-base/logs/api/v1"
 	"k8s.io/klog/v2"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+	"sigs.k8s.io/cluster-api/controllers/clustercache"
 	"sigs.k8s.io/cluster-api/controllers/remote"
 	"sigs.k8s.io/cluster-api/util/flags"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -31,6 +30,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+
+	controlplanev1alpha3 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1alpha3"
+	controlplanev1beta1 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1beta1"
+	"github.com/siderolabs/cluster-api-control-plane-provider-talos/controllers"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -53,6 +56,7 @@ func init() {
 	_ = clusterv1.AddToScheme(scheme)
 	_ = bootstrapv1alpha3.AddToScheme(scheme)
 	_ = controlplanev1alpha3.AddToScheme(scheme)
+	_ = controlplanev1beta1.AddToScheme(scheme)
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -141,47 +145,49 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Set up a ClusterCacheTracker to provide to controllers
-	// requiring a connection to a remote cluster
-	log := ctrl.Log.WithName("remote").WithName("ClusterCacheTracker")
-
-	tracker, err := remote.NewClusterCacheTracker(mgr, remote.ClusterCacheTrackerOptions{
-		SecretCachingClient: secretCachingClient,
-		ControllerName:      "cacppt",
-		Log:                 &log,
-		ClientUncachedObjects: []client.Object{
-			&corev1.ConfigMap{},
-			&corev1.Secret{},
-			&corev1.Pod{},
-			&appsv1.Deployment{},
-			&appsv1.DaemonSet{},
+	clusterCache, err := clustercache.SetupWithManager(context.Background(), mgr, clustercache.Options{
+		SecretClient: secretCachingClient,
+		Client: clustercache.ClientOptions{
+			UserAgent: remote.DefaultClusterAPIUserAgent("cluster-api-control-plane-provider-talos"),
+			Cache: clustercache.ClientCacheOptions{
+				DisableFor: []client.Object{
+					&corev1.ConfigMap{},
+					&corev1.Secret{},
+					&corev1.Pod{},
+					&appsv1.Deployment{},
+					&appsv1.DaemonSet{},
+				},
+			},
 		},
+	}, controller.Options{
+		MaxConcurrentReconciles: 10,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to create cluster cache tracker")
 		os.Exit(1)
 	}
 
-	if err := (&remote.ClusterCacheReconciler{
-		Client:  mgr.GetClient(),
-		Tracker: tracker,
-	}).SetupWithManager(context.Background(), mgr, controller.Options{MaxConcurrentReconciles: 10}); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "ClusterCacheReconciler")
-		os.Exit(1)
-	}
-
 	if err = (&controllers.TalosControlPlaneReconciler{
-		Client:    mgr.GetClient(),
-		APIReader: mgr.GetAPIReader(),
-		Log:       ctrl.Log.WithName("controllers").WithName("TalosControlPlane"),
-		Tracker:   tracker,
-		Scheme:    mgr.GetScheme(),
+		Client:       mgr.GetClient(),
+		APIReader:    mgr.GetAPIReader(),
+		Log:          ctrl.Log.WithName("controllers").WithName("TalosControlPlane"),
+		Scheme:       mgr.GetScheme(),
+		ClusterCache: clusterCache,
+		Recorder:     mgr.GetEventRecorder("taloscontrolplane-controller"),
 	}).SetupWithManager(mgr, controller.Options{MaxConcurrentReconciles: 10}); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "TalosControlPlane")
 		os.Exit(1)
 	}
-	if err = (&controlplanev1alpha3.TalosControlPlane{}).SetupWebhookWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create webhook", "webhook", "TalosConfigTemplate")
+	// Down-converting to v1alpha3 turns the contract-versioned infrastructure reference back into a
+	// full apiVersion.
+	controlplanev1alpha3.SetAPIVersionGetter(controllers.ContractAPIVersionGetter(mgr.GetClient(), mgr.GetRESTMapper()))
+
+	if err = (&controlplanev1beta1.TalosControlPlane{}).SetupWebhookWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create webhook", "webhook", "TalosControlPlane")
+		os.Exit(1)
+	}
+	if err = (&controlplanev1beta1.TalosControlPlaneTemplate{}).SetupWebhookWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create webhook", "webhook", "TalosControlPlaneTemplate")
 		os.Exit(1)
 	}
 

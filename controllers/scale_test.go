@@ -9,7 +9,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/cluster-api/util/collections"
 )
 
@@ -76,10 +76,7 @@ func TestSelectMachineForScaleDown(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			controlPlane := &ControlPlane{Machines: collections.FromMachines(ptrs(tt.machines)...)}
 
-			got, err := selectMachineForScaleDown(controlPlane, collections.FromMachines(ptrs(tt.outdated)...))
-			if err != nil {
-				t.Fatalf("selectMachineForScaleDown() error = %v", err)
-			}
+			got := selectMachineForScaleDown(controlPlane, collections.FromMachines(ptrs(tt.outdated)...))
 
 			if got.Name != tt.want {
 				t.Fatalf("selectMachineForScaleDown() = %q, want %q", got.Name, tt.want)
