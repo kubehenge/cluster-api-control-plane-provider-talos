@@ -8,7 +8,7 @@ import (
 	"context"
 	"reflect"
 
-	cabptv1 "github.com/siderolabs/cluster-api-bootstrap-provider-talos/api/v1alpha3"
+	cabptv1 "github.com/kubehenge/cluster-api-bootstrap-provider-talos/api/v1alpha3"
 
 	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
@@ -25,7 +25,7 @@ import (
 	"sigs.k8s.io/cluster-api/util/patch"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	controlplanev1 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1beta1"
+	controlplanev1 "github.com/kubehenge/cluster-api-control-plane-provider-talos/api/v1beta1"
 )
 
 // Log is the global logger for the internal package.

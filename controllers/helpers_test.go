@@ -17,8 +17,8 @@ import (
 	"sync"
 
 	"github.com/gobuffalo/flect"
+	bootstrapv1alpha3 "github.com/kubehenge/cluster-api-bootstrap-provider-talos/api/v1alpha3"
 	"github.com/pkg/errors"
-	bootstrapv1alpha3 "github.com/siderolabs/cluster-api-bootstrap-provider-talos/api/v1alpha3"
 	"github.com/siderolabs/crypto/tls"
 	"github.com/siderolabs/crypto/x509"
 	"github.com/siderolabs/gen/xslices"
@@ -54,8 +54,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	controlplanev1 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1beta1"
-	"github.com/siderolabs/cluster-api-control-plane-provider-talos/controllers"
+	controlplanev1 "github.com/kubehenge/cluster-api-control-plane-provider-talos/api/v1beta1"
+	"github.com/kubehenge/cluster-api-control-plane-provider-talos/controllers"
 )
 
 var fakeScheme = runtime.NewScheme()
