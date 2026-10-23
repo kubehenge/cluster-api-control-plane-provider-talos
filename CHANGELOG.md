@@ -2,9 +2,9 @@
 
 The changes of each release of this fork. The release pages on GitHub list every commit.
 
-## Unreleased
+## v0.6.0-alpha.2
 
-- The Go module is now `github.com/kubehenge/cluster-api-control-plane-provider-talos`, and it builds on this fork's bootstrap provider module, `github.com/kubehenge/cluster-api-bootstrap-provider-talos`; code that imports the API types has to change its import paths.
+- The Go module is now `github.com/kubehenge/cluster-api-control-plane-provider-talos`, and it builds on this fork's bootstrap provider module, `github.com/kubehenge/cluster-api-bootstrap-provider-talos` v0.7.0-alpha.5; code that imports the API types has to change its import paths.
 - The `cacppt-controller-manager-metrics-service` service now forwards to the manager's metrics port.
 - The manager no longer switches off gRPC's ALPN enforcement, which only Talos releases before v1.9 needed.
 - The samples in `config/samples/` use the v1beta1 APIs and a Talos 1.14 machine configuration.
