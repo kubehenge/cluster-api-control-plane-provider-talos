@@ -10,7 +10,6 @@ import (
 	"io"
 	"reflect"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -18,7 +17,6 @@ import (
 	"github.com/pkg/errors"
 	cabptv1 "github.com/siderolabs/cluster-api-bootstrap-provider-talos/api/v1alpha3"
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
-	talosclient "github.com/siderolabs/talos/pkg/machinery/client"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -609,84 +607,115 @@ func (r *TalosControlPlaneReconciler) bootstrapCluster(ctx context.Context, tcp 
 
 	defer cancel()
 
-	c, err := r.talosconfigForMachines(ctx, tcp, machines...)
+	if len(machines) == 0 {
+		return fmt.Errorf("no machines to bootstrap")
+	}
+
+	addresses := make(map[string]string, len(machines))
+
+	for _, machine := range machines {
+		address, ok := bootstrapAddress(machine)
+		if !ok {
+			return fmt.Errorf("machine %q doesn't have an any InternalIP or ExternalIP address yet", machine.Name)
+		}
+
+		addresses[machine.Name] = address
+	}
+
+	// A machine whose etcd data directory holds anything already runs or ran an etcd cluster, which a
+	// bootstrap of another machine would split; Talos refuses to bootstrap a machine for the same reason.
+	// Any machine that cannot be inspected means retrying later, never bootstrapping.
+	for i := range machines {
+		bootstrapped, err := r.etcdDataPresent(ctx, tcp, machines[i])
+		if err != nil {
+			return fmt.Errorf("failed to inspect the etcd data of machine %q: %w", machines[i].Name, err)
+		}
+
+		if bootstrapped {
+			return nil
+		}
+	}
+
+	first := slices.MinFunc(machines, func(a, b clusterv1.Machine) int {
+		return strings.Compare(addresses[a.Name], addresses[b.Name])
+	})
+
+	c, err := r.talosconfigForMachines(ctx, tcp, first)
 	if err != nil {
 		return err
 	}
 
 	defer c.Close() //nolint:errcheck
 
-	addresses := []string{}
-	for _, machine := range machines {
-		found := false
-
-		// Prefer finding an InternalIP address for the machine first.
-		for _, addr := range machine.Status.Addresses {
-			if addr.Type == clusterv1.MachineInternalIP {
-				addresses = append(addresses, addr.Address)
-
-				found = true
-
-				break
-			}
-		}
-
-		if found {
-			continue
-		}
-
-		// Fallback to finding an ExternalIP address for the machine
-		// if no InternalIP is found.
-		for _, addr := range machine.Status.Addresses {
-			if addr.Type == clusterv1.MachineExternalIP {
-				addresses = append(addresses, addr.Address)
-
-				found = true
-
-				break
-			}
-		}
-
-		if !found {
-			return fmt.Errorf("machine %q doesn't have an any InternalIP or ExternalIP address yet", machine.Name)
-		}
-	}
-
-	if len(addresses) == 0 {
-		return fmt.Errorf("no machine addresses to use for bootstrap")
-	}
-
-	list, err := c.LS(talosclient.WithNodes(ctx, addresses...), &machineapi.ListRequest{Root: "/var/lib/etcd/member"})
-	if err != nil {
-		return err
-	}
-
-	for {
-		info, err := list.Recv()
-		if err != nil {
-			if errors.Is(err, io.EOF) || talosclient.StatusCode(err) == codes.Canceled {
-				break
-			}
-
-			return err
-		}
-
-		// if the directory exists at least on a single node it means that cluster
-		// was already bootstrapped
-		if info.Metadata.Error == "" {
-			return nil
-		}
-	}
-
-	sort.Strings(addresses)
-
-	if err := c.Bootstrap(talosclient.WithNodes(ctx, addresses[0]), &machineapi.BootstrapRequest{}); err != nil {
+	if err := c.Bootstrap(ctx, &machineapi.BootstrapRequest{}); err != nil {
 		if status.Code(err) != codes.AlreadyExists {
 			return err
 		}
 	}
 
 	return nil
+}
+
+// bootstrapAddress returns the address the machine is ordered by for the bootstrap: its first
+// InternalIP, or its first ExternalIP when it has none.
+func bootstrapAddress(machine clusterv1.Machine) (string, bool) {
+	for _, addressType := range []clusterv1.MachineAddressType{clusterv1.MachineInternalIP, clusterv1.MachineExternalIP} {
+		for _, addr := range machine.Status.Addresses {
+			if addr.Type == addressType {
+				return addr.Address, true
+			}
+		}
+	}
+
+	return "", false
+}
+
+// etcdDataPresent reports whether the etcd data directory of the machine holds anything. The client
+// points at that machine alone, so the answer is its own.
+func (r *TalosControlPlaneReconciler) etcdDataPresent(ctx context.Context, tcp *controlplanev1.TalosControlPlane, machine clusterv1.Machine) (bool, error) {
+	c, err := r.talosconfigForMachines(ctx, tcp, machine)
+	if err != nil {
+		return false, err
+	}
+
+	defer c.Close() //nolint:errcheck
+
+	list, err := c.LS(ctx, &machineapi.ListRequest{Root: constants.EtcdDataPath, Recurse: true, RecursionDepth: 1})
+	if err != nil {
+		return false, err
+	}
+
+	listed := false
+
+	for {
+		info, err := list.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+
+		if err != nil {
+			return false, err
+		}
+
+		if info.GetError() != "" {
+			return false, fmt.Errorf("%s: %s", info.GetName(), info.GetError())
+		}
+
+		if info.GetRelativeName() == "." {
+			listed = true
+
+			continue
+		}
+
+		return true, nil
+	}
+
+	// Talos lists the directory itself first; a listing without it says nothing about the data.
+	if !listed {
+		return false, fmt.Errorf("the listing of %s is empty", constants.EtcdDataPath)
+	}
+
+	return false, nil
 }
 
 func (r *TalosControlPlaneReconciler) generateTalosConfig(ctx context.Context, tcp *controlplanev1.TalosControlPlane, name string, spec *cabptv1.TalosConfigSpec) (*clusterv1.ContractVersionedObjectReference, error) {

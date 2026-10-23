@@ -12,7 +12,6 @@ import (
 
 	. "github.com/onsi/gomega"
 	bootstrapv1alpha3 "github.com/siderolabs/cluster-api-bootstrap-provider-talos/api/v1alpha3"
-	"github.com/siderolabs/talos/pkg/machinery/api/common"
 	"github.com/siderolabs/talos/pkg/machinery/api/machine"
 	"github.com/siderolabs/talos/pkg/machinery/config"
 	"github.com/siderolabs/talos/pkg/machinery/config/generate/secrets"
@@ -165,7 +164,7 @@ func (suite *ControllersSuite) TestReconcilePaused() {
 			},
 		},
 	}
-	tcp.Default(suite.T().Context(), tcp)
+	g.Expect(tcp.Default(suite.T().Context(), tcp)).To(Succeed())
 	_, err := tcp.ValidateCreate(suite.T().Context(), tcp)
 	g.Expect(err).To(Succeed())
 	fakeClient := newFakeClient(tcp.DeepCopy(), cluster.DeepCopy())
@@ -180,8 +179,7 @@ func (suite *ControllersSuite) TestReconcilePaused() {
 
 	// Test: tcp is paused and cluster is not
 	cluster.Spec.Paused = ptr.To(false)
-	tcp.ObjectMeta.Annotations = map[string]string{}
-	tcp.ObjectMeta.Annotations[clusterv1.PausedAnnotation] = "paused"
+	tcp.Annotations = map[string]string{clusterv1.PausedAnnotation: "paused"}
 	_, err = r.Reconcile(suite.ctx, ctrl.Request{NamespacedName: util.ObjectKey(tcp)})
 	g.Expect(err).NotTo(HaveOccurred())
 }
@@ -220,7 +218,7 @@ func (suite *ControllersSuite) TestReconcileClusterNoEndpoints() {
 		},
 	}
 
-	tcp.Default(suite.T().Context(), tcp)
+	g.Expect(tcp.Default(suite.T().Context(), tcp)).To(Succeed())
 	_, err := tcp.ValidateCreate(suite.T().Context(), tcp)
 	g.Expect(err).To(Succeed())
 
@@ -251,7 +249,7 @@ func (suite *ControllersSuite) TestReconcileClusterNoEndpoints() {
 	result, err = r.Reconcile(suite.ctx, ctrl.Request{NamespacedName: util.ObjectKey(tcp)})
 	g.Expect(err).NotTo(HaveOccurred())
 
-	g.Expect(result).To(Equal(ctrl.Result{Requeue: false, RequeueAfter: 20 * time.Second}))
+	g.Expect(result).To(Equal(ctrl.Result{RequeueAfter: 20 * time.Second}))
 	g.Expect(r.Client.Get(suite.ctx, util.ObjectKey(tcp), tcp)).To(Succeed())
 
 	// Always expect that the Finalizer is set on the passed in resource
@@ -314,7 +312,7 @@ func (suite *ControllersSuite) TestReconcileInfrastructureReadyConditionFalse() 
 		},
 	}
 
-	tcp.Default(suite.T().Context(), tcp)
+	g.Expect(tcp.Default(suite.T().Context(), tcp)).To(Succeed())
 	_, err := tcp.ValidateCreate(suite.T().Context(), tcp)
 	g.Expect(err).To(Succeed())
 
@@ -373,7 +371,7 @@ func (suite *ControllersSuite) TestReconcileInfrastructureNotProvisioned() {
 		},
 	}
 
-	tcp.Default(suite.T().Context(), tcp)
+	g.Expect(tcp.Default(suite.T().Context(), tcp)).To(Succeed())
 	_, err := tcp.ValidateCreate(suite.T().Context(), tcp)
 	g.Expect(err).To(Succeed())
 
@@ -434,7 +432,7 @@ func (suite *ControllersSuite) TestReconcileCreatesMachineFromMachineTemplateCon
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(result).To(Equal(ctrl.Result{}))
 
-	result, err = r.Reconcile(suite.ctx, ctrl.Request{NamespacedName: util.ObjectKey(tcp)})
+	_, err = r.Reconcile(suite.ctx, ctrl.Request{NamespacedName: util.ObjectKey(tcp)})
 	g.Expect(err).NotTo(HaveOccurred())
 
 	machineList := &clusterv1.MachineList{}
@@ -480,7 +478,7 @@ func (suite *ControllersSuite) TestReconcileCreatesMachineFromCustomMachineNamin
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(result).To(Equal(ctrl.Result{}))
 
-	result, err = r.Reconcile(suite.ctx, ctrl.Request{NamespacedName: util.ObjectKey(tcp)})
+	_, err = r.Reconcile(suite.ctx, ctrl.Request{NamespacedName: util.ObjectKey(tcp)})
 	g.Expect(err).NotTo(HaveOccurred())
 
 	machineList := &clusterv1.MachineList{}
@@ -547,9 +545,25 @@ func (suite *ControllersSuite) TestReconcileDeleteWithLegacyFinalizer() {
 }
 
 func (suite *ControllersSuite) TestReconcileInitializeControlPlane() {
+	machineService := suite.initializeControlPlane("test-reconcile-init")
+
+	g := NewWithT(suite.T())
+	g.Expect(machineService.getBootstrapRequests()).To(Equal(1))
+}
+
+func (suite *ControllersSuite) TestReconcileDoesNotBootstrapExistingEtcd() {
+	machineService := suite.initializeControlPlane("test-reconcile-existing-etcd", "member")
+
+	g := NewWithT(suite.T())
+	g.Expect(machineService.getBootstrapRequests()).To(BeZero())
+}
+
+// initializeControlPlane reconciles a single-machine control plane until it is available and
+// bootstrapped, with the machine's etcd data directory holding etcdData at the start.
+func (suite *ControllersSuite) initializeControlPlane(ns string, etcdData ...string) *machineService {
 	fakeClient := newFakeClient()
 
-	cluster, tcp, infrastructureMachineTemplate := suite.setupCluster(fakeClient, "test-reconcile-init", nil)
+	cluster, tcp, infrastructureMachineTemplate := suite.setupCluster(fakeClient, ns, ptr.To[int32](1))
 
 	g := NewWithT(suite.T())
 
@@ -563,6 +577,7 @@ func (suite *ControllersSuite) TestReconcileInitializeControlPlane() {
 	g.Expect(tcp.Finalizers).To(ContainElement(controlplanev1.TalosControlPlaneFinalizer))
 
 	machineService, machineAddress := suite.startMachineServer()
+	machineService.setEtcdData(etcdData...)
 
 	m, n := createMachineNodePair("foo-machine1", cluster, tcp, true, machineAddress)
 	g.Expect(fakeClient.Create(suite.ctx, m)).To(Succeed())
@@ -574,9 +589,6 @@ func (suite *ControllersSuite) TestReconcileInitializeControlPlane() {
 	machineService.setServiceListResponse(&machine.ServiceListResponse{
 		Messages: []*machine.ServiceList{
 			{
-				Metadata: &common.Metadata{
-					Hostname: "foo-machine1",
-				},
 				Services: []*machine.ServiceInfo{
 					{
 						Id:    "etcd",
@@ -602,9 +614,6 @@ func (suite *ControllersSuite) TestReconcileInitializeControlPlane() {
 	machineService.setEtcdMembersResponse(&machine.EtcdMemberListResponse{
 		Messages: []*machine.EtcdMembers{
 			{
-				Metadata: &common.Metadata{
-					Hostname: "foo-machine1",
-				},
 				Members: []*machine.EtcdMember{
 					{
 						Id:       1,
@@ -637,6 +646,8 @@ func (suite *ControllersSuite) TestReconcileInitializeControlPlane() {
 		g.Expect(tcp.V1Beta1DeprecatedStatus().UpdatedReplicas).To(BeEquivalentTo(1))
 		g.Expect(conditions.IsTrue(tcp, string(controlplanev1.AvailableCondition))).To(BeTrue())
 		g.Expect(tcp.Status.ReadyReplicas).To(HaveValue(BeEquivalentTo(1)))
+		g.Expect(tcp.Status.Bootstrapped).To(BeTrue())
+		g.Expect(conditions.IsTrue(tcp, controlplanev1.MachinesBootstrapped)).To(BeTrue())
 
 		machineList := &clusterv1.MachineList{}
 		g.Expect(fakeClient.List(suite.ctx, machineList, client.InNamespace(cluster.Namespace))).To(Succeed())
@@ -645,6 +656,8 @@ func (suite *ControllersSuite) TestReconcileInitializeControlPlane() {
 		machine := machineList.Items[0]
 		g.Expect(machine.Name).To(HavePrefix(tcp.Name))
 	}, time.Second).Should(Succeed())
+
+	return machineService
 }
 
 func (suite *ControllersSuite) TestRollingUpdate() {
@@ -949,9 +962,6 @@ func (suite *ControllersSuite) updateEtcdMembers(fakeClient client.Client, clust
 		ms.setEtcdMembersResponse(&machine.EtcdMemberListResponse{
 			Messages: []*machine.EtcdMembers{
 				{
-					Metadata: &common.Metadata{
-						Hostname: m.Name,
-					},
 					Members: members,
 				},
 			},
@@ -962,23 +972,17 @@ func (suite *ControllersSuite) updateEtcdMembers(fakeClient client.Client, clust
 func (suite *ControllersSuite) addBootEvents(fakeClient client.Client, cluster *clusterv1.Cluster) {
 	g := NewWithT(suite.T())
 
-	machines := suite.getMachines(fakeClient, cluster)
-
-	bootDoneEvents := map[string][]*machine.SequenceEvent{}
-
-	for _, m := range machines {
-		bootDoneEvents[m.Name] = []*machine.SequenceEvent{
-			{
-				Sequence: "boot",
-				Action:   machine.SequenceEvent_START,
-			}, {
-				Sequence: "boot",
-				Action:   machine.SequenceEvent_STOP,
-			},
-		}
+	bootDone := []*machine.SequenceEvent{
+		{
+			Sequence: "boot",
+			Action:   machine.SequenceEvent_START,
+		}, {
+			Sequence: "boot",
+			Action:   machine.SequenceEvent_STOP,
+		},
 	}
 
-	for _, m := range machines {
+	for _, m := range suite.getMachines(fakeClient, cluster) {
 		if len(m.Status.Addresses) == 0 {
 			continue
 		}
@@ -988,9 +992,7 @@ func (suite *ControllersSuite) addBootEvents(fakeClient client.Client, cluster *
 
 		ms.resetSequenceEvents()
 
-		for name, events := range bootDoneEvents {
-			g.Expect(ms.addSequenceEvents(name, events...)).To(Succeed())
-		}
+		g.Expect(ms.addSequenceEvents(bootDone...)).To(Succeed())
 	}
 }
 
@@ -1004,9 +1006,6 @@ func (suite *ControllersSuite) setEtcdRunning(address string) {
 		&machine.ServiceListResponse{
 			Messages: []*machine.ServiceList{
 				{
-					Metadata: &common.Metadata{
-						Hostname: address,
-					},
 					Services: []*machine.ServiceInfo{
 						{
 							Id:    "etcd",

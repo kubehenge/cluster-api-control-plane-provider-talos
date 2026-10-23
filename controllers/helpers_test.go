@@ -22,7 +22,6 @@ import (
 	"github.com/siderolabs/crypto/tls"
 	"github.com/siderolabs/crypto/x509"
 	"github.com/siderolabs/gen/xslices"
-	"github.com/siderolabs/talos/pkg/machinery/api/common"
 	"github.com/siderolabs/talos/pkg/machinery/api/machine"
 	"github.com/siderolabs/talos/pkg/machinery/api/storage"
 	"github.com/siderolabs/talos/pkg/machinery/config/generate"
@@ -388,7 +387,7 @@ func generateCRD(gvk schema.GroupVersionKind, properties map[string]apiextension
 }
 
 func startMachineServer(ctx context.Context, secretsBundle *secrets.Bundle) (*machineService, string, error) {
-	listener, err := net.Listen("tcp", "localhost:0")
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "localhost:0")
 	if err != nil {
 		return nil, "", err
 	}
@@ -464,6 +463,9 @@ type machineService struct {
 	etcdMembers         *machine.EtcdMemberListResponse
 	serviceListResponse *machine.ServiceListResponse
 	resetChan           chan struct{}
+	// etcdData is what the etcd data directory holds; bootstrapping fills it, as on Talos.
+	etcdData          []string
+	bootstrapRequests int
 
 	requestsMu               sync.Mutex
 	etcdRemoveMemberRequests []*machine.EtcdRemoveMemberByIDRequest
@@ -478,7 +480,7 @@ func (ms *machineService) getEtcdRemoveMemberRequests() map[uint64]any {
 	})
 }
 
-func (ms *machineService) addSequenceEvents(node string, events ...*machine.SequenceEvent) error {
+func (ms *machineService) addSequenceEvents(events ...*machine.SequenceEvent) error {
 	ms.lock.Lock()
 	defer ms.lock.Unlock()
 
@@ -489,9 +491,6 @@ func (ms *machineService) addSequenceEvents(node string, events ...*machine.Sequ
 		}
 
 		ms.events = append(ms.events, &machine.Event{
-			Metadata: &common.Metadata{
-				Hostname: node,
-			},
 			Data: &anypb.Any{
 				TypeUrl: "talos/runtime/" + string(event.ProtoReflect().Descriptor().FullName()),
 				Value:   data,
@@ -510,7 +509,31 @@ func (ms *machineService) resetSequenceEvents() {
 }
 
 func (ms *machineService) Bootstrap(ctx context.Context, req *machine.BootstrapRequest) (*machine.BootstrapResponse, error) {
+	ms.lock.Lock()
+	defer ms.lock.Unlock()
+
+	if len(ms.etcdData) > 0 {
+		return nil, status.Error(codes.AlreadyExists, "etcd data directory is not empty")
+	}
+
+	ms.bootstrapRequests++
+	ms.etcdData = []string{"member"}
+
 	return &machine.BootstrapResponse{}, nil
+}
+
+func (ms *machineService) setEtcdData(entries ...string) {
+	ms.lock.Lock()
+	defer ms.lock.Unlock()
+
+	ms.etcdData = entries
+}
+
+func (ms *machineService) getBootstrapRequests() int {
+	ms.lock.Lock()
+	defer ms.lock.Unlock()
+
+	return ms.bootstrapRequests
 }
 
 func (ms *machineService) EtcdMemberList(ctx context.Context, req *machine.EtcdMemberListRequest) (*machine.EtcdMemberListResponse, error) {
@@ -524,7 +547,27 @@ func (ms *machineService) EtcdMemberList(ctx context.Context, req *machine.EtcdM
 	return ms.etcdMembers, nil
 }
 
+// List answers for the etcd data directory only, the way Talos walks a directory: the directory itself
+// first, then its entries.
 func (ms *machineService) List(req *machine.ListRequest, serv machine.MachineService_ListServer) error {
+	if req.GetRoot() != constants.EtcdDataPath {
+		return status.Errorf(codes.Unknown, "lstat %s: no such file or directory", req.GetRoot())
+	}
+
+	ms.lock.Lock()
+	entries := slices.Clone(ms.etcdData)
+	ms.lock.Unlock()
+
+	if err := serv.Send(&machine.FileInfo{Name: req.GetRoot(), RelativeName: ".", IsDir: true}); err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if err := serv.Send(&machine.FileInfo{Name: req.GetRoot() + "/" + entry, RelativeName: entry, IsDir: true}); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 

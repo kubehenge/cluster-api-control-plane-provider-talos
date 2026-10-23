@@ -11,15 +11,15 @@ import (
 
 	"github.com/pkg/errors"
 	cabptv1 "github.com/siderolabs/cluster-api-bootstrap-provider-talos/api/v1alpha3"
-	controlplanev1 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1beta1"
 	talosclient "github.com/siderolabs/talos/pkg/machinery/client"
 	talosconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
 	corev1 "k8s.io/api/core/v1"
-
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	controlplanev1 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1beta1"
 )
 
 // talosconfigForMachine will generate a talosconfig that uses *all* found addresses as the endpoints.
@@ -80,13 +80,16 @@ func (r *TalosControlPlaneReconciler) talosconfigForMachines(ctx context.Context
 	}
 
 	for _, machine := range machines {
+		found := false
+
 		for _, addr := range machine.Status.Addresses {
 			if addr.Type == clusterv1.MachineExternalIP || addr.Type == clusterv1.MachineInternalIP {
 				addrList = append(addrList, addr.Address)
+				found = true
 			}
 		}
 
-		if len(addrList) == 0 {
+		if !found {
 			return nil, fmt.Errorf("no addresses were found for node %q", machine.Name)
 		}
 	}
@@ -131,13 +134,16 @@ func (r *TalosControlPlaneReconciler) talosconfigFromWorkloadCluster(ctx context
 			return nil, err
 		}
 
+		found := false
+
 		for _, addr := range node.Status.Addresses {
 			if addr.Type == corev1.NodeExternalIP || addr.Type == corev1.NodeInternalIP {
 				addrList = append(addrList, addr.Address)
+				found = true
 			}
 		}
 
-		if len(addrList) == 0 {
+		if !found {
 			return nil, fmt.Errorf("no addresses were found for node %q", node.Name)
 		}
 
