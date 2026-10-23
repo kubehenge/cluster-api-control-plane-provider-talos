@@ -42,6 +42,18 @@ const (
 
 	// AvailableReason documents that the TalosControlPlane is available.
 	AvailableReason = "Available"
+
+	// NotAvailableReason documents that the TalosControlPlane is not available: it is not initialised or
+	// being deleted, etcd lost quorum, or no control plane machine has a node.
+	NotAvailableReason = "NotAvailable"
+
+	// RemoteConnectionProbeFailedReason documents that the workload cluster cannot be reached, so whether
+	// the TalosControlPlane is available is unknown.
+	RemoteConnectionProbeFailedReason = "RemoteConnectionProbeFailed"
+
+	// AvailableInspectionFailedReason documents that whether the TalosControlPlane is available could not
+	// be determined, as etcd could not be inspected.
+	AvailableInspectionFailedReason = "InspectionFailed"
 )
 
 const (

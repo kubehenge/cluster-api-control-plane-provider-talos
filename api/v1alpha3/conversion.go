@@ -69,6 +69,15 @@ func (src *TalosControlPlane) ConvertTo(dstRaw conversion.Hub) error {
 		dst.Status.Initialization = initialization
 	}
 
+	// Recover intent for int32 values converted to *int32.
+	var restoredReplicas, restoredReadyReplicas *int32
+	if ok {
+		restoredReplicas = restored.Status.Replicas
+		restoredReadyReplicas = restored.Status.ReadyReplicas
+	}
+	clusterv1.Convert_int32_To_Pointer_int32(src.Status.Replicas, ok, restoredReplicas, &dst.Status.Replicas)
+	clusterv1.Convert_int32_To_Pointer_int32(src.Status.ReadyReplicas, ok, restoredReadyReplicas, &dst.Status.ReadyReplicas)
+
 	// Recover hub-only fields preserved via the data annotation.
 	if ok {
 		dst.Spec.MachineNamingStrategy = restored.Spec.MachineNamingStrategy

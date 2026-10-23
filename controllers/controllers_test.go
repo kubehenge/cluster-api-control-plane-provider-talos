@@ -380,11 +380,19 @@ func (suite *ControllersSuite) TestReconcileInfrastructureNotProvisioned() {
 	fakeClient := newFakeClient(tcp.DeepCopy(), cluster.DeepCopy())
 	r := newReconciler(fakeClient, withCluster(util.ObjectKey(cluster)))
 
-	result, err := r.Reconcile(suite.ctx, ctrl.Request{NamespacedName: util.ObjectKey(tcp)})
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(result).To(Equal(ctrl.Result{Requeue: true}))
+	for range 2 {
+		_, err := r.Reconcile(suite.ctx, ctrl.Request{NamespacedName: util.ObjectKey(tcp)})
+		g.Expect(err).NotTo(HaveOccurred())
+	}
+
+	// The finalizer goes on first, so a deletion is handled whatever the infrastructure does, but no
+	// Machine is created.
 	g.Expect(r.Client.Get(suite.ctx, util.ObjectKey(tcp), tcp)).To(Succeed())
-	g.Expect(tcp.Finalizers).To(BeEmpty())
+	g.Expect(tcp.Finalizers).To(ContainElement(controlplanev1.TalosControlPlaneFinalizer))
+
+	machines := &clusterv1.MachineList{}
+	g.Expect(r.Client.List(suite.ctx, machines, client.InNamespace(cluster.Namespace))).To(Succeed())
+	g.Expect(machines.Items).To(BeEmpty())
 }
 
 func (suite *ControllersSuite) TestReconcileCreatesMachineFromMachineTemplateContract() {
@@ -625,10 +633,10 @@ func (suite *ControllersSuite) TestReconcileInitializeControlPlane() {
 		g.Expect(tcp.Finalizers).To(ContainElement(controlplanev1.TalosControlPlaneFinalizer))
 
 		g.Expect(tcp.Status.Selector).NotTo(BeEmpty())
-		g.Expect(tcp.Status.Replicas).To(BeEquivalentTo(1))
+		g.Expect(tcp.Status.Replicas).To(HaveValue(BeEquivalentTo(1)))
 		g.Expect(tcp.V1Beta1DeprecatedStatus().UpdatedReplicas).To(BeEquivalentTo(1))
 		g.Expect(conditions.IsTrue(tcp, string(controlplanev1.AvailableCondition))).To(BeTrue())
-		g.Expect(tcp.Status.ReadyReplicas).To(BeEquivalentTo(1))
+		g.Expect(tcp.Status.ReadyReplicas).To(HaveValue(BeEquivalentTo(1)))
 
 		machineList := &clusterv1.MachineList{}
 		g.Expect(fakeClient.List(suite.ctx, machineList, client.InNamespace(cluster.Namespace))).To(Succeed())
@@ -686,10 +694,10 @@ func (suite *ControllersSuite) TestRollingUpdate() {
 		g.Expect(tcp.Finalizers).To(ContainElement(controlplanev1.TalosControlPlaneFinalizer))
 
 		g.Expect(tcp.Status.Selector).NotTo(BeEmpty())
-		g.Expect(tcp.Status.Replicas).To(BeEquivalentTo(2))
+		g.Expect(tcp.Status.Replicas).To(HaveValue(BeEquivalentTo(2)))
 		g.Expect(tcp.V1Beta1DeprecatedStatus().UpdatedReplicas).To(BeEquivalentTo(2))
 		g.Expect(conditions.IsTrue(tcp, string(controlplanev1.AvailableCondition))).To(BeTrue())
-		g.Expect(tcp.Status.ReadyReplicas).To(BeEquivalentTo(2))
+		g.Expect(tcp.Status.ReadyReplicas).To(HaveValue(BeEquivalentTo(2)))
 
 		machineList := &clusterv1.MachineList{}
 		g.Expect(fakeClient.List(suite.ctx, machineList, client.InNamespace(cluster.Namespace))).To(Succeed())
@@ -710,7 +718,7 @@ func (suite *ControllersSuite) TestRollingUpdate() {
 		g.Expect(err).NotTo(HaveOccurred())
 		suite.markMachinesReady(g, fakeClient, cluster.Namespace)
 		g.Expect(r.APIReader.Get(suite.ctx, client.ObjectKey{Name: tcp.Name, Namespace: tcp.Namespace}, tcp)).To(Succeed())
-		g.Expect(tcp.Status.ReadyReplicas).To(BeEquivalentTo(2))
+		g.Expect(tcp.Status.ReadyReplicas).To(HaveValue(BeEquivalentTo(2)))
 
 		machines := suite.getMachines(fakeClient, cluster)
 		for _, machine := range machines {
@@ -735,7 +743,7 @@ func (suite *ControllersSuite) TestRollingUpdate() {
 		g.Expect(err).NotTo(HaveOccurred())
 		suite.markMachinesReady(g, fakeClient, cluster.Namespace)
 		g.Expect(r.APIReader.Get(suite.ctx, client.ObjectKey{Name: tcp.Name, Namespace: tcp.Namespace}, tcp)).To(Succeed())
-		g.Expect(tcp.Status.ReadyReplicas).To(BeEquivalentTo(2))
+		g.Expect(tcp.Status.ReadyReplicas).To(HaveValue(BeEquivalentTo(2)))
 
 		machines := suite.getMachines(fakeClient, cluster)
 		for _, machine := range machines {
@@ -794,10 +802,10 @@ func (suite *ControllersSuite) TestUppercaseHostnames() {
 		g.Expect(tcp.Finalizers).To(ContainElement(controlplanev1.TalosControlPlaneFinalizer))
 
 		g.Expect(tcp.Status.Selector).NotTo(BeEmpty())
-		g.Expect(tcp.Status.Replicas).To(BeEquivalentTo(3))
+		g.Expect(tcp.Status.Replicas).To(HaveValue(BeEquivalentTo(3)))
 		g.Expect(tcp.V1Beta1DeprecatedStatus().UpdatedReplicas).To(BeEquivalentTo(3))
 		g.Expect(conditions.IsTrue(tcp, string(controlplanev1.AvailableCondition))).To(BeTrue())
-		g.Expect(tcp.Status.ReadyReplicas).To(BeEquivalentTo(3))
+		g.Expect(tcp.Status.ReadyReplicas).To(HaveValue(BeEquivalentTo(3)))
 
 		machineList := &clusterv1.MachineList{}
 		g.Expect(fakeClient.List(suite.ctx, machineList, client.InNamespace(cluster.Namespace))).To(Succeed())

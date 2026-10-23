@@ -1037,8 +1037,9 @@ spec:
                 format: int64
                 type: integer
               readyReplicas:
-                description: Total number of fully running and ready control plane
-                  machines.
+                description: |-
+                  ReadyReplicas is the number of ready replicas for this ControlPlane.
+                  A machine is considered ready when Machine's Ready condition is true.
                 format: int32
                 type: integer
               replicas:
