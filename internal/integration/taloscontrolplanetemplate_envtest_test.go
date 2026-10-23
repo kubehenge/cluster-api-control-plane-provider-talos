@@ -7,6 +7,7 @@ package integration_test
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -31,6 +32,12 @@ import (
 func TestTalosControlPlaneTemplateWebhookIntegration(t *testing.T) {
 	t.Parallel()
 
+	// `make integration` always sets KUBEBUILDER_ASSETS, so a missing API server fails there instead
+	// of passing silently; a plain `go test ./...` without it skips.
+	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		t.Skip("KUBEBUILDER_ASSETS is not set; run `make envtest integration`")
+	}
+
 	testEnv := &envtest.Environment{
 		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
 		ErrorIfCRDPathMissing: true,
@@ -41,10 +48,6 @@ func TestTalosControlPlaneTemplateWebhookIntegration(t *testing.T) {
 
 	cfg, err := testEnv.Start()
 	if err != nil {
-		if strings.Contains(err.Error(), "fork/exec") || strings.Contains(err.Error(), "no such file or directory") {
-			t.Skipf("envtest binaries are not available: %v", err)
-		}
-
 		t.Fatalf("failed to start envtest: %v", err)
 	}
 
