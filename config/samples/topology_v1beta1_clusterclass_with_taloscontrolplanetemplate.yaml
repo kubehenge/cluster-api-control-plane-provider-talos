@@ -29,7 +29,7 @@ spec:
     - class: default-worker
       bootstrap:
         templateRef:
-          apiVersion: bootstrap.cluster.x-k8s.io/v1alpha3
+          apiVersion: bootstrap.cluster.x-k8s.io/v1beta1
           kind: TalosConfigTemplate
           name: talos-worker-template
       infrastructure:
@@ -46,7 +46,7 @@ spec:
   topology:
     classRef:
       name: talos-quickstart
-    version: v1.31.0
+    version: v1.37.1
     controlPlane:
       replicas: 3
     workers:

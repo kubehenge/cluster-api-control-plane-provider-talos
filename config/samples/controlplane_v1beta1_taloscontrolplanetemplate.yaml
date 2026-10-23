@@ -1,6 +1,5 @@
-# ClusterClass-oriented TalosControlPlaneTemplate example.
-# This sample intentionally omits machineTemplate.infrastructureRef because
-# ClusterClass.spec.controlPlane.machineInfrastructure.ref provides it.
+# A TalosControlPlaneTemplate for a ClusterClass. It has no machineTemplate.spec.infrastructureRef:
+# ClusterClass.spec.controlPlane.machineInfrastructure.templateRef provides it.
 apiVersion: controlplane.cluster.x-k8s.io/v1beta1
 kind: TalosControlPlaneTemplate
 metadata:
@@ -13,12 +12,15 @@ spec:
       machineTemplate:
         metadata:
           labels:
-            example.siderolabs.dev/control-plane: "true"
+            example.com/control-plane: "true"
       controlPlaneConfig:
         controlplane:
           generateType: controlplane
+          talosVersion: v1.14
           strategicPatches:
             - |
-              machine:
-                install:
-                  disk: /dev/sda
+              apiVersion: v1alpha1
+              kind: UnattendedInstallConfig
+              provisioning:
+                diskSelector:
+                  match: disk.dev_path == "/dev/sda"
