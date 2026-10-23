@@ -11,14 +11,15 @@ spec:
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: serving-cert # this name should match the one appeared in kustomizeconfig.yaml
+  name: serving-cert # this name should match the one in config/default/kustomization.yaml
   namespace: system
 spec:
-  # $(SERVICE_NAME) and $(SERVICE_NAMESPACE) will be substituted by kustomize
+  # The replacements in config/default/kustomization.yaml fill in the webhook service's name and namespace.
   dnsNames:
-    - $(SERVICE_NAME).$(SERVICE_NAMESPACE).svc
-    - $(SERVICE_NAME).$(SERVICE_NAMESPACE).svc.cluster.local
+    - SERVICE_NAME_PLACEHOLDER.SERVICE_NAMESPACE_PLACEHOLDER.svc
+    - SERVICE_NAME_PLACEHOLDER.SERVICE_NAMESPACE_PLACEHOLDER.svc.cluster.local
   issuerRef:
     kind: Issuer
     name: selfsigned-issuer
-  secretName: $(SERVICE_NAME)-cert
+  # The manager's volume in config/default/manager_webhook_patch.yaml mounts this secret.
+  secretName: cacppt-webhook-service-cert
