@@ -34,14 +34,17 @@ COSIGN_VERSION := v3.1.4
 ENVTEST_VERSION := envtest-v1.37.0
 ENVTEST_SHA256 := f03faedfc68d2a78cee5cb02618bb44e7f67044f4c5fc957f72d3307fda61a9c
 
-CONTROLLER_GEN := $(BIN)/controller-gen
-CONVERSION_GEN := $(BIN)/conversion-gen
-GOLANGCI_LINT := $(BIN)/golangci-lint
-KUSTOMIZE := $(BIN)/kustomize
-KO := $(BIN)/ko
-COSIGN := $(BIN)/cosign
+# The suffix `go install` gives binaries on the build platform, so the tool targets find what they built.
+GOEXE := $(shell $(GO) env GOEXE)
+CONTROLLER_GEN := $(BIN)/controller-gen$(GOEXE)
+CONVERSION_GEN := $(BIN)/conversion-gen$(GOEXE)
+GOLANGCI_LINT := $(BIN)/golangci-lint$(GOEXE)
+KUSTOMIZE := $(BIN)/kustomize$(GOEXE)
+KO := $(BIN)/ko$(GOEXE)
+COSIGN := $(BIN)/cosign$(GOEXE)
 ENVTEST_DIR := $(abspath $(ARTIFACTS)/envtest/$(ENVTEST_VERSION))
-# Each API version by name: on Windows controller-gen fails on ./api/..., whose root holds no Go files.
+# Each API version by name: controller-gen can generate nothing for ./... on some platforms, and it
+# fails on ./api/..., whose root holds no Go files.
 API_PACKAGES := $(patsubst %/,./%/...,$(sort $(wildcard api/*/)))
 
 .DEFAULT_GOAL := help
@@ -73,7 +76,7 @@ tools: $(CONTROLLER_GEN) $(CONVERSION_GEN) $(GOLANGCI_LINT) $(KUSTOMIZE) $(KO) $
 
 .PHONY: generate
 generate: $(CONTROLLER_GEN) $(CONVERSION_GEN) ## Generate deepcopy and conversion code.
-	$(CONTROLLER_GEN) object:headerFile=./hack/boilerplate.go.txt paths="./..."
+	$(CONTROLLER_GEN) object:headerFile=./hack/boilerplate.go.txt $(addprefix paths=,$(API_PACKAGES))
 	$(CONVERSION_GEN) --output-file=zz_generated.conversion.go --go-header-file=./hack/boilerplate.go.txt ./api/v1alpha3
 
 .PHONY: manifests
