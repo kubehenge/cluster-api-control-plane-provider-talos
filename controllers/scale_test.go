@@ -76,10 +76,7 @@ func TestSelectMachineForScaleDown(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			controlPlane := &ControlPlane{Machines: collections.FromMachines(ptrs(tt.machines)...)}
 
-			got, err := selectMachineForScaleDown(controlPlane, collections.FromMachines(ptrs(tt.outdated)...))
-			if err != nil {
-				t.Fatalf("selectMachineForScaleDown() error = %v", err)
-			}
+			got := selectMachineForScaleDown(controlPlane, collections.FromMachines(ptrs(tt.outdated)...))
 
 			if got.Name != tt.want {
 				t.Fatalf("selectMachineForScaleDown() = %q, want %q", got.Name, tt.want)

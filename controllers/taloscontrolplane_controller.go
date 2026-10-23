@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/selection"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/cluster-api/controllers/clustercache"
@@ -60,6 +61,10 @@ type TalosControlPlaneReconciler struct {
 	Log          logr.Logger
 	Scheme       *runtime.Scheme
 	ClusterCache clustercache.ClusterCache
+	Recorder     events.EventRecorder
+
+	// machineAPI replaces the calls to the Talos API of the machines in tests.
+	machineAPI machineAPI
 }
 
 func (r *TalosControlPlaneReconciler) SetupWithManager(mgr ctrl.Manager, options controller.Options) error {
@@ -75,6 +80,7 @@ func (r *TalosControlPlaneReconciler) SetupWithManager(mgr ctrl.Manager, options
 }
 
 // +kubebuilder:rbac:groups=core,resources=events,verbs=get;list;watch;create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;patch;update
 // +kubebuilder:rbac:groups=core,resources=configmaps,namespace=kube-system,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups=rbac,resources=roles,namespace=kube-system,verbs=get;list;watch;create
@@ -191,6 +197,27 @@ func (r *TalosControlPlaneReconciler) reconcile(ctx context.Context, cluster *cl
 	logger := ctrl.LoggerFrom(ctx, "cluster", cluster.Name)
 	logger.Info("reconcile TalosControlPlane")
 
+	ownedMachines, err := r.getControlPlaneMachinesForCluster(ctx, util.ObjectKey(cluster))
+	if err != nil {
+		logger.Error(err, "failed to retrieve control plane machines for cluster")
+
+		return ctrl.Result{}, err
+	}
+
+	// A deleting machine waits at its pre-terminate hook whatever else is wrong, so the hooks come first.
+	hookResult, hookErr := r.reconcilePreTerminateHooks(ctx, cluster, tcp, &ownedMachines)
+	if hookErr != nil {
+		logger.Info("failed to reconcile the pre-terminate hooks of the control plane machines", "error", hookErr)
+	}
+
+	res, err = r.reconcileControlPlane(ctx, cluster, tcp, &ownedMachines)
+
+	return util.LowestNonZeroResult(res, hookResult), kerrors.NewAggregate([]error{err, hookErr})
+}
+
+func (r *TalosControlPlaneReconciler) reconcileControlPlane(ctx context.Context, cluster *clusterv1.Cluster, tcp *controlplanev1.TalosControlPlane, machines *clusterv1.MachineList) (res ctrl.Result, err error) {
+	logger := ctrl.LoggerFrom(ctx, "cluster", cluster.Name)
+
 	// Update ownerrefs on infra templates
 	if err := r.reconcileExternalReference(ctx, tcp.Spec.MachineTemplate.Spec.InfrastructureRef, cluster); err != nil {
 		return ctrl.Result{}, err
@@ -203,13 +230,7 @@ func (r *TalosControlPlaneReconciler) reconcile(ctx context.Context, cluster *cl
 		return ctrl.Result{}, nil
 	}
 
-	// TODO: handle proper adoption of Machines
-	ownedMachines, err := r.getControlPlaneMachinesForCluster(ctx, util.ObjectKey(cluster))
-	if err != nil {
-		logger.Error(err, "failed to retrieve control plane machines for cluster")
-
-		return ctrl.Result{}, err
-	}
+	ownedMachines := *machines
 
 	if len(ownedMachines.Items) > 0 {
 		machinesForConditions := make([]*clusterv1.Machine, 0, len(ownedMachines.Items))
@@ -239,7 +260,7 @@ func (r *TalosControlPlaneReconciler) reconcile(ctx context.Context, cluster *cl
 		r.reconcileNodeHealth,
 		r.reconcileConditions,
 		r.reconcileKubeconfig,
-		r.reconcileMachines,
+		r.reconcileRemediationAndMachines,
 	} {
 		phaseResult, err = phase(ctx, cluster, tcp, &ownedMachines)
 		if err != nil {
@@ -292,13 +313,20 @@ func (r *TalosControlPlaneReconciler) reconcileDelete(ctx context.Context, clust
 		return ctrl.Result{}, r.Client.Update(ctx, tcp)
 	}
 
-	for _, ownedMachine := range ownedMachines.Items {
-		// Already deleting this machine
-		if !ownedMachine.ObjectMeta.DeletionTimestamp.IsZero() {
+	for i := range ownedMachines.Items {
+		ownedMachine := &ownedMachines.Items[i]
+
+		// The whole control plane goes, so no etcd member needs to leave first: KCP releases every
+		// hook on deletion too.
+		if err := r.releasePreTerminateHook(ctx, ownedMachine); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		if !ownedMachine.DeletionTimestamp.IsZero() {
 			continue
 		}
-		// Submit deletion request
-		if err := r.Client.Delete(ctx, &ownedMachine); err != nil && !apierrors.IsNotFound(err) {
+
+		if err := r.Client.Delete(ctx, ownedMachine); err != nil && !apierrors.IsNotFound(err) {
 			r.Log.Error(err, "failed to cleanup owned machine")
 			return ctrl.Result{}, err
 		}
@@ -510,12 +538,10 @@ func (r *TalosControlPlaneReconciler) bootControlPlane(ctx context.Context, clus
 
 	machine := &clusterv1.Machine{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      machineName,
-			Namespace: tcp.Namespace,
-			Labels:    controlPlaneMachineLabelsForCluster(tcp, cluster.Name),
-			Annotations: copyStringMap(
-				tcp.Spec.MachineTemplate.ObjectMeta.Annotations,
-			),
+			Name:        machineName,
+			Namespace:   tcp.Namespace,
+			Labels:      controlPlaneMachineLabelsForCluster(tcp, cluster.Name),
+			Annotations: desiredMachineAnnotations(tcp),
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(tcp, controlplanev1.GroupVersion.WithKind("TalosControlPlane")),
 			},
@@ -880,11 +906,11 @@ func (r *TalosControlPlaneReconciler) reconcileEtcdMembers(ctx context.Context, 
 		errs = kerrors.NewAggregate([]error{errs, err})
 	}
 
-	if err := r.etcdHealthcheck(ctx, tcp, machines.Items); err != nil {
+	if health, err := r.etcdHealthcheck(ctx, tcp, machines.Items); err != nil {
 		conditions.Set(tcp, metav1.Condition{
 			Type:    string(controlplanev1.EtcdClusterHealthyCondition),
 			Status:  metav1.ConditionFalse,
-			Reason:  controlplanev1.EtcdClusterUnhealthyReason,
+			Reason:  health.conditionReason(),
 			Message: fmt.Sprintf("Failed to perform etcd healthcheck: %v", err),
 		})
 		errs = kerrors.NewAggregate([]error{errs, err})
@@ -904,10 +930,13 @@ func (r *TalosControlPlaneReconciler) reconcileEtcdMembers(ctx context.Context, 
 }
 
 func (r *TalosControlPlaneReconciler) reconcileNodeHealth(ctx context.Context, cluster *clusterv1.Cluster, tcp *controlplanev1.TalosControlPlane, machines *clusterv1.MachineList) (result ctrl.Result, err error) {
-	if err := r.nodesHealthcheck(ctx, tcp, machines.Items); err != nil {
+	// a deleting machine is drained and its services stop on purpose, which says nothing of the health
+	// of the control plane that stays
+	if err := r.nodesHealthcheck(ctx, tcp, remainingMachines(machines.Items)); err != nil {
 		reason := controlplanev1.ControlPlaneComponentsInspectionFailedReason
 
-		if errors.Is(err, &errServiceUnhealthy{}) {
+		var unhealthy *errServiceUnhealthy
+		if errors.As(err, &unhealthy) {
 			reason = controlplanev1.ControlPlaneComponentsUnhealthyReason
 		}
 
@@ -1045,27 +1074,6 @@ func (r *TalosControlPlaneReconciler) reconcileMachines(ctx context.Context, clu
 		return ctrl.Result{}, err
 	}
 
-	// Remediate machines a MachineHealthCheck flagged for the control plane to handle: nobody else
-	// will, so left alone they stay unhealthy voting members forever. Like a scale-down, remediation
-	// removes one machine at a time and only once the rest of etcd is healthy; the scale-up below then
-	// replaces it. A lone machine is never remediated, as that would leave no control plane at all.
-	if unhealthy := controlPlane.UnhealthyMachines(); unhealthy.Len() > 0 {
-		if numMachines > 1 {
-			logger.Info("remediating unhealthy control plane machines", "machines", unhealthy.Names())
-
-			res, err = r.scaleDownControlPlane(ctx, cluster, tcp, controlPlane, collections.Machines{})
-			if err != nil && (res.Requeue || res.RequeueAfter > 0) {
-				logger.Info("failed to remediate control plane", "error", err)
-
-				return res, nil
-			}
-
-			return res, err
-		}
-
-		logger.Info("refusing to remediate the only control plane machine", "machines", unhealthy.Names())
-	}
-
 	needRollout := controlPlane.MachinesNeedingRollout()
 	if len(needRollout) > 0 {
 		logger.Info("rolling out control plane machines", "needRollout", needRollout.Names())
@@ -1099,16 +1107,7 @@ func (r *TalosControlPlaneReconciler) reconcileMachines(ctx context.Context, clu
 		return r.scaleUpControlPlane(ctx, cluster, tcp, controlPlane)
 	// We are scaling down
 	case numMachines > desiredReplicas:
-		res, err = r.scaleDownControlPlane(ctx, cluster, tcp, controlPlane, collections.Machines{})
-		if err != nil {
-			if res.Requeue || res.RequeueAfter > 0 {
-				logger.Info("failed to scale down control plane", "error", err)
-
-				return res, nil
-			}
-		}
-
-		return res, err
+		return r.scaleDownControlPlane(ctx, tcp, controlPlane, collections.Machines{})
 	default:
 		if !reflect.ValueOf(tcp.Spec.ControlPlaneConfig.InitConfig).IsZero() {
 			tcp.Status.Bootstrapped = true
@@ -1171,6 +1170,24 @@ func controlPlaneMachineLabelsForCluster(tcp *controlplanev1.TalosControlPlane, 
 	labels[clusterv1.MachineControlPlaneNameLabel] = format.MustFormatValue(tcp.Name)
 
 	return labels
+}
+
+// desiredMachineAnnotations returns the annotations a new control plane Machine is created with: the
+// template's, the pre-terminate hook, and, while a remediation waits for its replacement, the record of
+// that remediation, so that the new Machine's own remediation counts as a retry.
+func desiredMachineAnnotations(tcp *controlplanev1.TalosControlPlane) map[string]string {
+	annotations := copyStringMap(tcp.Spec.MachineTemplate.ObjectMeta.Annotations)
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+
+	annotations[PreTerminateHookCleanupAnnotation] = ""
+
+	if value, ok := tcp.Annotations[remediationInProgressAnnotation]; ok {
+		annotations[remediationForAnnotation] = value
+	}
+
+	return annotations
 }
 
 func copyStringMap(in map[string]string) map[string]string {

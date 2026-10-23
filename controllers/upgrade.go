@@ -34,11 +34,11 @@ func (r *TalosControlPlaneReconciler) upgradeControlPlane(
 		// RolloutStrategy is currently defaulted and validated to be RollingUpdate
 		maxNodes := tcp.Spec.GetReplicas() + int32(tcp.Spec.RolloutStrategy.RollingUpdate.MaxSurge.IntValue())
 		if int32(controlPlane.Machines.Len()) < maxNodes {
-			// scaleUp ensures that we don't continue scaling up while waiting for Machines to have NodeRefs
+			// the preflight checks of the scale-up hold it until every machine has a node and is healthy
 			return r.scaleUpControlPlane(ctx, cluster, tcp, controlPlane)
 		}
 
-		return r.scaleDownControlPlane(ctx, cluster, tcp, controlPlane, machinesRequireUpgrade)
+		return r.scaleDownControlPlane(ctx, tcp, controlPlane, machinesRequireUpgrade)
 	case controlplanev1.OnDeleteStrategyType:
 		// nothing to do, scale up handler will take care of creating machines with the new spec
 		return ctrl.Result{}, nil

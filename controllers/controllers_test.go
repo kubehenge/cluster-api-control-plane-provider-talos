@@ -572,7 +572,7 @@ func (suite *ControllersSuite) TestReconcileInitializeControlPlane() {
 				Services: []*machine.ServiceInfo{
 					{
 						Id:    "etcd",
-						State: "running",
+						State: "Running",
 						Events: &machine.ServiceEvents{
 							Events: []*machine.ServiceEvent{
 								{
@@ -1002,7 +1002,7 @@ func (suite *ControllersSuite) setEtcdRunning(address string) {
 					Services: []*machine.ServiceInfo{
 						{
 							Id:    "etcd",
-							State: "running",
+							State: "Running",
 							Events: &machine.ServiceEvents{
 								Events: []*machine.ServiceEvent{
 									{

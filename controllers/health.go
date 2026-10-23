@@ -8,57 +8,37 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/pkg/errors"
-	controlplanev1 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1beta1"
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
 	talosclient "github.com/siderolabs/talos/pkg/machinery/client"
 	"google.golang.org/grpc/codes"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+
+	controlplanev1 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1beta1"
 )
 
-type errServiceUnhealthy struct {
-	service string
-	reason  string
-}
-
-func (e *errServiceUnhealthy) Error() string {
-	return fmt.Sprintf("Service %s is unhealthy: %s", e.service, e.reason)
-}
-
+// nodesHealthcheck checks the control plane services of every machine, concurrently and each within
+// its own timeout, and returns the problem of the first machine in order that has one.
 func (r *TalosControlPlaneReconciler) nodesHealthcheck(ctx context.Context, tcp *controlplanev1.TalosControlPlane, machines []clusterv1.Machine) error {
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
+	api := r.talosAPI()
+	errs := make([]error, len(machines))
 
-	for _, machine := range machines {
-		if err := func() error {
-			client, err := r.talosconfigForMachines(ctx, tcp, machine)
-			if err != nil {
-				return err
-			}
+	var wg sync.WaitGroup
 
-			defer client.Close() //nolint:errcheck
+	for i := range machines {
+		wg.Go(func() {
+			errs[i] = api.CheckServices(ctx, tcp, &machines[i])
+		})
+	}
 
-			serviceList, err := client.ServiceList(ctx)
-			if err != nil {
-				return err
-			}
+	wg.Wait()
 
-			for _, message := range serviceList.Messages {
-				for _, svc := range message.Services {
-					if !svc.GetHealth().Unknown && !svc.GetHealth().Healthy {
-						return &errServiceUnhealthy{
-							service: svc.GetId(),
-							reason:  svc.GetState(),
-						}
-					}
-				}
-			}
-
-			return nil
-		}(); err != nil {
-			return fmt.Errorf("machine %q: %w", machine.Name, err)
+	for i, err := range errs {
+		if err != nil {
+			return fmt.Errorf("machine %q: %w", machines[i].Name, err)
 		}
 	}
 

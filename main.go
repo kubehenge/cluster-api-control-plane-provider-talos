@@ -10,9 +10,6 @@ import (
 	"os"
 
 	bootstrapv1alpha3 "github.com/siderolabs/cluster-api-bootstrap-provider-talos/api/v1alpha3"
-	controlplanev1alpha3 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1alpha3"
-	controlplanev1beta1 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1beta1"
-	"github.com/siderolabs/cluster-api-control-plane-provider-talos/controllers"
 	"github.com/spf13/pflag"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -34,6 +31,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+
+	controlplanev1alpha3 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1alpha3"
+	controlplanev1beta1 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1beta1"
+	"github.com/siderolabs/cluster-api-control-plane-provider-talos/controllers"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -173,6 +174,7 @@ func main() {
 		Log:          ctrl.Log.WithName("controllers").WithName("TalosControlPlane"),
 		Scheme:       mgr.GetScheme(),
 		ClusterCache: clusterCache,
+		Recorder:     mgr.GetEventRecorder("taloscontrolplane-controller"),
 	}).SetupWithManager(mgr, controller.Options{MaxConcurrentReconciles: 10}); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "TalosControlPlane")
 		os.Exit(1)
