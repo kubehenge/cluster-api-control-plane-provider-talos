@@ -43,9 +43,9 @@ KUSTOMIZE := $(BIN)/kustomize$(GOEXE)
 KO := $(BIN)/ko$(GOEXE)
 COSIGN := $(BIN)/cosign$(GOEXE)
 ENVTEST_DIR := $(abspath $(ARTIFACTS)/envtest/$(ENVTEST_VERSION))
-# Each API version by name: controller-gen can generate nothing for ./... on some platforms, and it
-# fails on ./api/..., whose root holds no Go files.
-API_PACKAGES := $(patsubst %/,./%/...,$(sort $(wildcard api/*/)))
+# controller-gen is given import paths, never directories: it makes a directory root absolute with
+# filepath.Abs, which on some platforms drops a trailing `...` and leaves only the directory itself.
+MODULE := $(shell $(GO) list -m)
 
 .DEFAULT_GOAL := help
 
@@ -76,13 +76,13 @@ tools: $(CONTROLLER_GEN) $(CONVERSION_GEN) $(GOLANGCI_LINT) $(KUSTOMIZE) $(KO) $
 
 .PHONY: generate
 generate: $(CONTROLLER_GEN) $(CONVERSION_GEN) ## Generate deepcopy and conversion code.
-	$(CONTROLLER_GEN) object:headerFile=./hack/boilerplate.go.txt $(addprefix paths=,$(API_PACKAGES))
-	$(CONVERSION_GEN) --output-file=zz_generated.conversion.go --go-header-file=./hack/boilerplate.go.txt ./api/v1alpha3
+	$(CONTROLLER_GEN) object:headerFile=./hack/boilerplate.go.txt paths=$(MODULE)/api/...
+	$(CONVERSION_GEN) --output-file=zz_generated.conversion.go --go-header-file=./hack/boilerplate.go.txt $(MODULE)/api/v1alpha3
 
 .PHONY: manifests
 manifests: $(CONTROLLER_GEN) ## Generate the CRDs, webhooks and RBAC rules.
-	$(CONTROLLER_GEN) crd:crdVersions=v1 $(addprefix paths=,$(API_PACKAGES)) output:crd:dir=config/crd/bases output:webhook:dir=config/webhook webhook
-	$(CONTROLLER_GEN) rbac:roleName=manager-role paths="./controllers/..." output:rbac:dir=config/rbac
+	$(CONTROLLER_GEN) crd:crdVersions=v1 paths=$(MODULE)/api/... output:crd:dir=config/crd/bases output:webhook:dir=config/webhook webhook
+	$(CONTROLLER_GEN) rbac:roleName=manager-role paths=$(MODULE)/controllers/... output:rbac:dir=config/rbac
 
 .PHONY: check-dirty
 check-dirty: ## Fail when the tree differs from what is committed, as after generate or manifests.
