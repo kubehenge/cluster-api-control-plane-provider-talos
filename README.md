@@ -1,282 +1,149 @@
-# cluster-api-control-plane-provider-talos
+# Cluster API Control Plane Provider Talos
 
-<!-- textlint-disable -->
-> [!CAUTION]
-> Sidero Labs is no longer actively developing Cluster API Control Plane Provider Talos.
->
-> For an alternative, please see [Omni](https://github.com/siderolabs/omni.git).
->
-> Unless you have an existing support contract covering Cluster API Control Plane Provider Talos, all support will be provided by the community (including questions in our Slack workspace).
-<!-- textlint-enable -->
+The Cluster API Control Plane Provider Talos (CACPPT) is a [Cluster API](https://cluster-api.sigs.k8s.io/) control plane provider for [Talos Linux](https://www.talos.dev/).
+A `TalosControlPlane` creates the control plane `Machine` objects of a cluster with their `TalosConfig`, bootstraps etcd on the first one, and scales, rolls out and remediates them the way KubeadmControlPlane does: one machine at a time, behind preflight checks, never at the cost of etcd quorum.
+A machine leaves etcd at a pre-terminate hook, after Cluster API has drained its node and before its infrastructure goes.
 
-## Intro
+It works together with the [Cluster API Bootstrap Provider Talos](https://github.com/kubehenge/cluster-api-bootstrap-provider-talos).
 
-The Cluster API Control Plane Provider Talos (CACPPT) is a project by [Sidero Labs](https://www.SideroLabs.com/) that provides a [Cluster API](https://github.com/kubernetes-sigs/cluster-api)(CAPI) control plane provider for use in deploying Talos Linux-based Kubernetes nodes across any environment.
-Given some basic info, this provider will generate control plane configurations for a given cluster and reconcile the necessary custom resources for CAPI to pick up the generated data.
+This fork is maintained primarily for [Kubehenge](https://kubehenge.dev), and it is open to anyone: issues and pull requests are welcome.
 
-## Corequisites
+## Compatibility
 
-There are a few corequisites and assumptions that go into using this project:
+| Component | Supported |
+| --- | --- |
+| Cluster API contract | v1beta2 |
+| Cluster API | v1.14, built and tested against v1.14.3 |
+| Talos Linux | v1.9 to v1.14, the releases the bootstrap provider generates configuration for |
+| Kubernetes | the releases the Talos release supports, listed below |
 
-- [Cluster API](https://github.com/kubernetes-sigs/cluster-api)
-- [Cluster API Bootstrap Provider Talos](https://github.com/talos-systems/cluster-api-bootstrap-provider-talos)
-- [Cluster API Provider Metal](https://github.com/talos-systems/cluster-api-provider-metal) (optional)
+| Talos Linux | Kubernetes |
+| --- | --- |
+| v1.14 | v1.32 to v1.37 |
+| v1.13 | v1.31 to v1.36 |
+| v1.12 | v1.30 to v1.35 |
+| v1.11 | v1.29 to v1.34 |
+| v1.10 | v1.28 to v1.33 |
+| v1.9 | v1.27 to v1.32 |
 
-## Compatibility with Cluster API and Kubernetes Versions
+The API is `controlplane.cluster.x-k8s.io/v1beta1`; `v1alpha3` is still served and converted.
 
-This provider's versions are compatible with the following versions of Cluster API:
+## Installing
 
-|                                              | v1alpha3 (v0.3) | v1alpha4 (v0.4) | v1beta1 (v1.x) | v1beta2 (v1.12+) |
-| -------------------------------------------- | --------------- | --------------- | -------------- | ---------------- |
-| Control Plane Provider Talos v1alpha3 (v0.2) | ✓               |                 |                |                  |
-| Control Plane Provider Talos v1alpha3 (v0.3) |                 | ✓               |                |                  |
-| Control Plane Provider Talos v1alpha3 (v0.4) |                 |                 | ✓              |                  |
-| Control Plane Provider Talos v1alpha3 (v0.5) |                 |                 | ✓              |                  |
-| Control Plane Provider Talos v1alpha3 (v0.6) |                 |                 |                | ✓                |
-
-The `v0.6.x` release series targets the Cluster API `v1beta2` contract (CAPI core `v1.12+`, currently tested with `v1.13.0`).
-Released `v0.5.x` artifacts remain on `v1beta1`; `config/metadata/metadata.yaml` advertises the `v0.6` series as `v1beta2`.
-
-This provider's versions are able to install and manage the following versions of Kubernetes:
-
-|                                              | v1.16 | v1.17 | v1.18 | v1.19 | v1.20 | v1.21 | v1.22 | v1.23 | v1.24 | v1.25 | v1.26 | v1.27 | v1.28 | v1.29 | v1.30 | v1.31 | v1.32 | v1.33 | v1.34 | v1.35 | v1.36 | v1.37 |
-| -------------------------------------------  | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- |
-| Control Plane Provider Talos v1alpha3 (v0.2) | ✓     | ✓     | ✓     | ✓     | ✓     | ✓     |       |       |       |       |       |       |       |       |       |       |       |       |       |       |       |       |
-| Control Plane Provider Talos v1alpha3 (v0.3) | ✓     | ✓     | ✓     | ✓     | ✓     | ✓     |       |       |       |       |       |       |       |       |       |       |       |       |       |       |       |       |
-| Control Plane Provider Talos v1alpha3 (v0.4) |       |       |       | ✓     | ✓     | ✓     | ✓     | ✓     | ✓     | ✓     | ✓     |       |       |       |       |       |       |       |       |       |       |       |
-| Control Plane Provider Talos v1alpha3 (v0.5) |       |       |       |       |       |       |       |       |       |       | ✓     | ✓     | ✓     | ✓     | ✓     | ✓     | ✓     | ✓     | ✓     | ✓     | ✓     | ✓     |
-| Control Plane Provider Talos v1alpha3 (v0.6) |       |       |       |       |       |       |       |       |       |       |       |       |       |       | ✓     | ✓     | ✓     | ✓     | ✓     | ✓     | ✓     | ✓     |
-
-This provider's versions are compatible with the following versions of Talos:
-
-|                                              | v0.11 | v0.12  | v0.13 | v0.14 | v1.0  | v1.1  | v1.2  | v1.3  | v1.4  | v1.5  | v1.6  | v1.7  | v1.8  | v1.9  | v1.10 | v1.11 | v1.12 | v1.13 | v1.14 |
-| -------------------------------------------- | ----- | ------ | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- |
-| Control Plane Provider Talos v1alpha3 (v0.2) | ✓     | ✓      |       |       |       |       |       |       |       |       |       |       |       |       |       |       |       |       |       |
-| Control Plane Provider Talos v1alpha3 (v0.3) | ✓     | ✓      | ✓     |       |       |       |       |       |       |       |       |       |       |       |       |       |       |       |       |
-| Control Plane Provider Talos v1alpha3 (v0.4) | ✓     | ✓      | ✓     | ✓     | ✓     | ✓     | ✓     | ✓     |       |       |       |       |       |       |       |       |       |       |       |
-| Control Plane Provider Talos v1alpha3 (v0.5) |       |        |       |       |       |       |       | ✓     | ✓     | ✓     | ✓     | ✓     | ✓     | ✓     | ✓     | ✓     | ✓     | ✓     | ✓     |
-| Control Plane Provider Talos v1alpha3 (v0.6) |       |        |       |       |       |       |       |       |       |       |       |       |       |       | ✓     | ✓     | ✓     | ✓     | ✓     |
-
-## Building and Installing
-
-This control plane provider can be installed with clusterctl:
-
-```bash
-clusterctl init -c talos -b talos -i <infra-provider-of-choice>
-```
-
-If you encounter the following error, this is caused by a rename of our GitHub org from `talos-systems` to `siderolabs`.
-
-```bash
-$ clusterctl init -b talos -c talos -i sidero
-Fetching providers
-Error: failed to get provider components for the "talos" provider: target namespace can't be defaulted. Please specify a target namespace
-```
-
-This can be worked around by adding the following to `~/.cluster-api/clusterctl.yaml` and rerunning the init command:
+clusterctl knows a provider called `talos` that points at the Sidero Labs releases.
+To install this fork instead, add both Talos providers to `~/.config/cluster-api/clusterctl.yaml` (or `~/.cluster-api/clusterctl.yaml`):
 
 ```yaml
 providers:
-  - name: "talos"
-    url: "https://github.com/siderolabs/cluster-api-bootstrap-provider-talos/releases/latest/bootstrap-components.yaml"
-    type: "BootstrapProvider"
-  - name: "talos"
-    url: "https://github.com/siderolabs/cluster-api-control-plane-provider-talos/releases/latest/control-plane-components.yaml"
-    type: "ControlPlaneProvider"
-  - name: "sidero"
-    url: "https://github.com/siderolabs/sidero/releases/latest/infrastructure-components.yaml"
-    type: "InfrastructureProvider"
+  - name: talos
+    url: https://github.com/kubehenge/cluster-api-bootstrap-provider-talos/releases/latest/bootstrap-components.yaml
+    type: BootstrapProvider
+  - name: talos
+    url: https://github.com/kubehenge/cluster-api-control-plane-provider-talos/releases/latest/control-plane-components.yaml
+    type: ControlPlaneProvider
 ```
 
-If you are going to use this provider as part of Sidero management plane, please refer to [Sidero Docs](https://www.sidero.dev/docs/v0.4/getting-started/install-clusterapi/)
-on how to install and configure it.
+Then initialise the management cluster with them:
 
-This project can be built simply by running `make release` from the root directory.
-Building requires Go 1.26+ (the `v0.6.x` series depends on CAPI `v1.13.0` / controller-runtime `v0.23`).
-Doing so will create a file called `_out/control-plane-components.yaml`.
-If you wish, you can tweak settings by editing the release yaml.
-This file can then be installed into your management cluster with `kubectl apply -f _out/control-plane-components.yaml`.
+```shell
+clusterctl init --bootstrap talos --control-plane talos --infrastructure <infrastructure provider>
+```
 
-Note that CACPPT should be deployed as part of a set of controllers for Cluster API.
-You will need at least the upstream CAPI components, the Talos bootstrap provider, and an infrastructure provider for v1beta2 CAPI capabilities.
-
-CACPPT plays the following role in the whole Cluster API architecture:
-
-![Cluster API CACPPT](/docs/images/cacppt.png)
+clusterctl never picks a prerelease on its own; to install one, name its version, as in `--control-plane talos:<version>`.
 
 ## Usage
 
-### Supported Templates
-
-You can use recommended [Cluster API templates](https://github.com/talos-systems/cluster-api-templates) provided by Sidero Labs.
-
-It contains templates for `AWS` and `GCP`, which are verified by the integration tests.
-
-### Creating Your Own Templates
-
-If you wish to craft your own manifests, here is some important info.
-
-CACPPT supports two API types:
-
-- `TalosControlPlane` for direct control plane resources.
-- `TalosControlPlaneTemplate` for ClusterClass / managed topology.
-
-You can create YAML definitions of a `TalosControlPlane` and `kubectl apply` them as part of a larger CAPI cluster deployment.
-Below is a bare-minimum example.
-
-A basic config:
-
 ```yaml
-apiVersion: controlplane.cluster.x-k8s.io/v1alpha3
+apiVersion: controlplane.cluster.x-k8s.io/v1beta1
 kind: TalosControlPlane
 metadata:
   name: talos-cp
 spec:
-  version: v1.31.0
-  replicas: 1
-  machineNamingStrategy:
-    template: "{{ .talosControlPlane.name }}-{{ .random }}"
+  version: v1.37.1
+  replicas: 3
   machineTemplate:
     spec:
       infrastructureRef:
         apiGroup: infrastructure.cluster.x-k8s.io
-        kind: DockerMachineTemplate
-        name: talos-cp-machine-template
+        kind: ProxmoxMachineTemplate
+        name: talos-cp
   controlPlaneConfig:
     controlplane:
       generateType: controlplane
+      talosVersion: v1.14
       strategicPatches:
         - |
-          machine:
-            install:
-              disk: /dev/sda
+          apiVersion: v1alpha1
+          kind: UnattendedInstallConfig
+          provisioning:
+            diskSelector:
+              match: disk.dev_path == "/dev/sda"
 ```
 
-Direct `TalosControlPlane` resources must reference an infrastructure machine template via
-`spec.machineTemplate.spec.infrastructureRef`.
-See your infrastructure provider for how to craft the referenced machine template.
+- `replicas`: an odd number, as etcd needs a majority of its members.
+- `machineTemplate`: the infrastructure machine template, and the labels, annotations, readiness gates and deletion timeouts the control plane `Machine` objects get.
+- `controlPlaneConfig.controlplane`: the `TalosConfig` spec of every control plane machine, as the bootstrap provider documents it. `generateType: none` with `data` uses a machine configuration you supply as it is.
+- `machineNamingStrategy.template`: the names of the `Machine` objects, their infrastructure machines and their `TalosConfig` objects, from `.cluster.name`, `.talosControlPlane.name` and `.random`, which it must contain. The default is `{{ .talosControlPlane.name }}-{{ .random }}`.
+- `rolloutStrategy`: `RollingUpdate` (the default) adds a machine with the new spec before it deletes an outdated one, with `maxSurge` 1; with `maxSurge` 0 it deletes an outdated machine first and creates its successor after. `OnDelete` waits for you to delete outdated machines and replaces each one you delete.
 
-`spec.machineNamingStrategy` controls the names used for control plane `Machine` objects.
-The corresponding infrastructure machine and Talos bootstrap config reuse the same name.
-If you omit the field, the default template is `{{ .talosControlPlane.name }}-{{ .random }}`.
-Custom templates must include `{{ .random }}` and can use:
+For managed topology, a `TalosControlPlaneTemplate` holds the same spec without `machineTemplate.spec.infrastructureRef`, which comes from `ClusterClass.spec.controlPlane.machineInfrastructure.templateRef`; `config/samples/` has an example. Its `spec.template.spec` is immutable, so a change is a new template.
 
-- `.cluster.name`
-- `.talosControlPlane.name`
-- `.random`
+The bootstrap provider stores the `talosconfig` of the cluster in the `<cluster>-talosconfig` secret:
 
-`strategicPatches` is an array of strings.
-Each patch must be passed as a YAML string, typically via a block scalar (`- |`), not as an inline object.
-
-Note the generateType mentioned above.
-This is a required value in the spec for both controlplane and worker ("join") nodes.
-For a no-frills control plane config, you can simply specify `controlplane` depending on each config section.
-When creating a `TalosControlPlane` this way, you can retrieve the generated Talos client config from the corresponding `TalosConfig` object after creation, for example with `kubectl get talosconfig talos-cp-xxxx -o jsonpath='{.status.talosConfig}'`.
-
-If you wish to do something more complex, we allow for the ability to supply an entire Talos machine config file to the resource.
-This can be done by setting `controlPlaneConfig.controlplane.generateType` to `none` and specifying a `data` field.
-This config file can be generated with `talosctl gen config` and then edited to supply the various options you may desire.
-When you provide `data` this way, the bootstrap provider uses the supplied Talos machine configuration as-is instead of generating one for you.
-
-An example of a more complex config:
-
-```yaml
-apiVersion: controlplane.cluster.x-k8s.io/v1alpha3
-kind: TalosControlPlane
-metadata:
-  name: talos-0
-  labels:
-    cluster.x-k8s.io/cluster-name: talos
-spec:
-  controlPlaneConfig:
-    controlplane:
-      generateType: none
-      data: |
-        version: v1alpha1
-        machine:
-          type: controlplane
-        cluster:
-          token: xxxxxx
-        ...
+```shell
+kubectl get secret --namespace <namespace> <cluster>-talosconfig -o jsonpath='{.data.talosconfig}' | base64 -d > talosconfig
 ```
 
-When you manage the full machine configuration yourself, you should also keep track of the Talos client configuration you generated alongside it.
+### Machine lifecycle
 
+- **Deletion.** Every control plane `Machine` carries the `pre-terminate.delete.hook.machine.cluster.x-k8s.io/tcp-cleanup` hook. When Cluster API has drained a deleted machine and no other pre-terminate hook is left, the machine leaves etcd, or a healthy peer removes its member when its etcd no longer runs. The removal waits while it would cost etcd its quorum or while a member is a learner; the hook is released without touching etcd when the whole cluster goes.
+- **Remediation.** A machine a MachineHealthCheck marks for remediation by its owner is deleted and replaced, one at a time, never the last one, and only while losing its member keeps etcd quorum. A replacement that fails again is retried at most three times, five minutes apart.
+- **Status.** `Available` is False while the control plane is not initialised, etcd has lost quorum or no machine has a node, and Unknown once the workload cluster has been unreachable for longer than the five minute grace period. A paused Cluster or `TalosControlPlane` reports `Paused` and is left alone.
 
-### ClusterClass / managed topology
+## Releases
 
-For managed topology, define a `TalosControlPlaneTemplate` and reference it from a `ClusterClass`.
-These examples use `cluster.x-k8s.io/v1beta2`, which matches the contract targeted by the `v0.6.x` release series.
-The template example below intentionally omits `machineTemplate.spec.infrastructureRef`; for ClusterClass-managed topology, that reference comes from `ClusterClass.spec.controlPlane.machineInfrastructure.templateRef`.
-`TalosControlPlaneTemplate.spec.template.spec` is immutable after creation, so create a new template resource when you need to roll out a spec change.
+A release is built by the release workflow from its version tag and carries `control-plane-components.yaml`, `metadata.yaml` and `SHA256SUMS`.
 
-```yaml
-apiVersion: controlplane.cluster.x-k8s.io/v1alpha3
-kind: TalosControlPlaneTemplate
-metadata:
-  name: talos-cp-template
-spec:
-  template:
-    spec:
-      machineNamingStrategy:
-        template: "{{ .talosControlPlane.name }}-{{ .random }}"
-      machineTemplate:
-        metadata:
-          labels:
-            example.siderolabs.dev/control-plane: "true"
-      controlPlaneConfig:
-        controlplane:
-          generateType: controlplane
-          strategicPatches:
-            - |
-              machine:
-                install:
-                  disk: /dev/sda
----
-apiVersion: cluster.x-k8s.io/v1beta2
-kind: ClusterClass
-metadata:
-  name: talos-quickstart
-spec:
-  controlPlane:
-    naming:
-      template: "{{ .cluster.name }}-control-plane"
-    templateRef:
-      apiVersion: controlplane.cluster.x-k8s.io/v1alpha3
-      kind: TalosControlPlaneTemplate
-      name: talos-cp-template
-    machineInfrastructure:
-      templateRef:
-        apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
-        kind: DockerMachineTemplate
-        name: talos-cp-machine-template
----
-apiVersion: cluster.x-k8s.io/v1beta2
-kind: Cluster
-metadata:
-  name: talos-topology
-spec:
-  topology:
-    classRef:
-      name: talos-quickstart
-    version: v1.31.0
-    controlPlane:
-      replicas: 3
+- The controller image is `ghcr.io/kubehenge/cluster-api-control-plane-provider-talos`, and `control-plane-components.yaml` names it by digest, so what a release installs cannot change after it is published. Its base image and every tool the build uses are pinned by digest or checksum.
+- The image is signed with keyless [cosign](https://docs.sigstore.dev/) and carries a build provenance attestation; the release files carry one too.
+- `SHA256SUMS` holds the checksums of the release files.
+
+To check the image a release names before installing it:
+
+```shell
+cosign verify ghcr.io/kubehenge/cluster-api-control-plane-provider-talos@sha256:<digest> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github\.com/kubehenge/cluster-api-control-plane-provider-talos/\.github/workflows/release\.yaml@refs/tags/v'
+gh attestation verify oci://ghcr.io/kubehenge/cluster-api-control-plane-provider-talos@sha256:<digest> \
+  --repo kubehenge/cluster-api-control-plane-provider-talos
 ```
 
-For ClusterClass / topology, the infrastructure machine template is supplied via
-`ClusterClass.spec.controlPlane.machineInfrastructure.templateRef`, and the topology controller
-populates `TalosControlPlane.spec.machineTemplate.spec.infrastructureRef` on the generated
-concrete control plane object.
+And the downloaded release files:
 
-For naming in managed topology there are two levels:
+```shell
+sha256sum -c SHA256SUMS
+gh attestation verify control-plane-components.yaml --repo kubehenge/cluster-api-control-plane-provider-talos
+```
 
-- `ClusterClass.spec.controlPlane.naming.template` controls the generated `TalosControlPlane` name.
-- `TalosControlPlaneTemplate.spec.template.spec.machineNamingStrategy` controls the generated control plane `Machine`, infrastructure machine, and Talos bootstrap config names.
+## Building
 
-With the example above, a cluster named `talos-topology` produces a concrete `TalosControlPlane`
-named `talos-topology-control-plane`, and control plane machines named
-`talos-topology-control-plane-xxxxx`.
+Everything builds natively with Go and the tools the Makefile installs into `_out/bin`; `make help` lists the targets.
 
-See `config/samples/topology_v1alpha3_clusterclass_with_taloscontrolplanetemplate.yaml` for a ClusterClass / Cluster fragment including workers.
-That sample assumes the referenced infrastructure and worker bootstrap templates already exist.
+```shell
+make generate manifests  # deepcopy and conversion code, CRDs, webhooks and RBAC
+make lint unit           # golangci-lint and the unit tests under the race detector
+make envtest integration # the integration tests against a local API server and etcd
+make image KO_FLAGS=--push=false TAG=dev
+```
+
+`make envtest` downloads the linux/amd64 API server and etcd; elsewhere, point `KUBEBUILDER_ASSETS` at a directory holding them.
+
+## Credits
+
+This provider was created by [Sidero Labs](https://www.siderolabs.com/), who keep the original at [siderolabs/cluster-api-control-plane-provider-talos](https://github.com/siderolabs/cluster-api-control-plane-provider-talos).
+The Cluster API v1beta2 port builds on their open pull request for it, and the machine lifecycle and remediation build on the work in the community forks of Nick Atkins and Pip Oomen.
+`CHANGELOG.md` holds the history of the Sidero Labs releases.
+
+## Licence
+
+[Mozilla Public License 2.0](LICENSE).
