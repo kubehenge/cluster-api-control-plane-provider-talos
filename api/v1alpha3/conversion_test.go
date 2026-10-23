@@ -14,7 +14,7 @@ import (
 	"k8s.io/utils/ptr"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 
-	cpv1beta1 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1beta1"
+	cpv1beta1 "github.com/kubehenge/cluster-api-control-plane-provider-talos/api/v1beta1"
 )
 
 func TestConvertFromWithoutInfrastructureAPIVersion(t *testing.T) {

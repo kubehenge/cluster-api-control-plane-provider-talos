@@ -17,7 +17,7 @@ import (
 	"google.golang.org/grpc/codes"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 
-	controlplanev1 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1beta1"
+	controlplanev1 "github.com/kubehenge/cluster-api-control-plane-provider-talos/api/v1beta1"
 )
 
 // nodesHealthcheck checks the control plane services of every machine, concurrently and each within

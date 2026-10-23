@@ -19,7 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	controlplanev1 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1beta1"
+	controlplanev1 "github.com/kubehenge/cluster-api-control-plane-provider-talos/api/v1beta1"
 )
 
 func TestControlPlaneMachineLabelsForClusterFormatsTheControlPlaneName(t *testing.T) {
@@ -78,10 +78,10 @@ func TestReconcileMachineTemplateStatePropagatesMachineFieldsInPlace(t *testing.
 			MachineTemplate: controlplanev1.TalosControlPlaneMachineTemplate{
 				ObjectMeta: clusterv1.ObjectMeta{
 					Labels: map[string]string{
-						"example.siderolabs.dev/control-plane": "true",
+						"example.com/control-plane": "true",
 					},
 					Annotations: map[string]string{
-						"example.siderolabs.dev/annotation": "present",
+						"example.com/annotation": "present",
 					},
 				},
 				Spec: controlplanev1.TalosControlPlaneMachineTemplateSpec{
@@ -112,10 +112,10 @@ func TestReconcileMachineTemplateStatePropagatesMachineFieldsInPlace(t *testing.
 	if persisted.Labels["keep"] != "true" {
 		t.Fatalf("expected unrelated labels to be preserved")
 	}
-	if persisted.Labels["example.siderolabs.dev/control-plane"] != "true" {
+	if persisted.Labels["example.com/control-plane"] != "true" {
 		t.Fatalf("expected machineTemplate labels to be propagated")
 	}
-	if persisted.Annotations["example.siderolabs.dev/annotation"] != "present" {
+	if persisted.Annotations["example.com/annotation"] != "present" {
 		t.Fatalf("expected machineTemplate annotations to be propagated")
 	}
 	if persisted.Labels[clusterv1.ClusterNameLabel] != cluster.Name {

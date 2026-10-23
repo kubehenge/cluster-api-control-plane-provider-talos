@@ -9,7 +9,7 @@ import (
 	"flag"
 	"os"
 
-	bootstrapv1alpha3 "github.com/siderolabs/cluster-api-bootstrap-provider-talos/api/v1alpha3"
+	bootstrapv1alpha3 "github.com/kubehenge/cluster-api-bootstrap-provider-talos/api/v1alpha3"
 	"github.com/spf13/pflag"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -31,9 +31,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	controlplanev1alpha3 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1alpha3"
-	controlplanev1beta1 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1beta1"
-	"github.com/siderolabs/cluster-api-control-plane-provider-talos/controllers"
+	controlplanev1alpha3 "github.com/kubehenge/cluster-api-control-plane-provider-talos/api/v1alpha3"
+	controlplanev1beta1 "github.com/kubehenge/cluster-api-control-plane-provider-talos/api/v1beta1"
+	"github.com/kubehenge/cluster-api-control-plane-provider-talos/controllers"
 	// +kubebuilder:scaffold:imports
 )
 

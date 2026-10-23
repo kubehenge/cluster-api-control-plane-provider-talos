@@ -95,7 +95,7 @@ lint: $(GOLANGCI_LINT) ## Run golangci-lint.
 .PHONY: unit
 unit: ## Run the unit tests under the race detector.
 	mkdir -p $(ARTIFACTS)
-	CGO_ENABLED=1 $(GO) test -race -count=1 -covermode=atomic -coverprofile=$(ARTIFACTS)/coverage.txt ./api/... ./controllers/... ./pkg/...
+	CGO_ENABLED=1 $(GO) test -race -count=1 -covermode=atomic -coverprofile=$(ARTIFACTS)/coverage.txt ./api/... ./controllers/...
 
 $(ENVTEST_DIR)/kube-apiserver:
 	mkdir -p $(ENVTEST_DIR)

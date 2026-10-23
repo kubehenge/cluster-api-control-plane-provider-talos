@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	cabptv1 "github.com/siderolabs/cluster-api-bootstrap-provider-talos/api/v1alpha3"
+	cabptv1 "github.com/kubehenge/cluster-api-bootstrap-provider-talos/api/v1alpha3"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -26,7 +26,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	controlplanev1 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1beta1"
+	controlplanev1 "github.com/kubehenge/cluster-api-control-plane-provider-talos/api/v1beta1"
 )
 
 func TestTalosControlPlaneTemplateWebhookIntegration(t *testing.T) {
@@ -273,7 +273,7 @@ func TestTalosControlPlaneTemplateWebhookIntegration(t *testing.T) {
 		t.Fatalf("failed to reload template: %v", err)
 	}
 	metadataOnly.Labels = map[string]string{
-		"example.siderolabs.dev/revision": "2",
+		"example.com/revision": "2",
 	}
 	if err := k8sClient.Update(ctx, metadataOnly); err != nil {
 		t.Fatalf("expected metadata-only update to succeed: %v", err)

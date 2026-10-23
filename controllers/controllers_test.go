@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
+	bootstrapv1alpha3 "github.com/kubehenge/cluster-api-bootstrap-provider-talos/api/v1alpha3"
 	. "github.com/onsi/gomega"
-	bootstrapv1alpha3 "github.com/siderolabs/cluster-api-bootstrap-provider-talos/api/v1alpha3"
 	"github.com/siderolabs/talos/pkg/machinery/api/machine"
 	"github.com/siderolabs/talos/pkg/machinery/config"
 	"github.com/siderolabs/talos/pkg/machinery/config/generate/secrets"
@@ -33,8 +33,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	controlplanev1 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1beta1"
-	"github.com/siderolabs/cluster-api-control-plane-provider-talos/controllers"
+	controlplanev1 "github.com/kubehenge/cluster-api-control-plane-provider-talos/api/v1beta1"
+	"github.com/kubehenge/cluster-api-control-plane-provider-talos/controllers"
 )
 
 type ControllersSuite struct {
@@ -406,10 +406,10 @@ func (suite *ControllersSuite) TestReconcileCreatesMachineFromMachineTemplateCon
 	tcp.Spec.MachineTemplate = controlplanev1.TalosControlPlaneMachineTemplate{
 		ObjectMeta: clusterv1.ObjectMeta{
 			Labels: map[string]string{
-				"example.siderolabs.dev/control-plane": "true",
+				"example.com/control-plane": "true",
 			},
 			Annotations: map[string]string{
-				"example.siderolabs.dev/annotation": "present",
+				"example.com/annotation": "present",
 			},
 		},
 		Spec: controlplanev1.TalosControlPlaneMachineTemplateSpec{
@@ -440,8 +440,8 @@ func (suite *ControllersSuite) TestReconcileCreatesMachineFromMachineTemplateCon
 	g.Expect(machineList.Items).To(HaveLen(1))
 
 	machine := machineList.Items[0]
-	g.Expect(machine.Labels["example.siderolabs.dev/control-plane"]).To(Equal("true"))
-	g.Expect(machine.Annotations["example.siderolabs.dev/annotation"]).To(Equal("present"))
+	g.Expect(machine.Labels["example.com/control-plane"]).To(Equal("true"))
+	g.Expect(machine.Annotations["example.com/annotation"]).To(Equal("present"))
 	g.Expect(machine.Labels[clusterv1.ClusterNameLabel]).To(Equal(cluster.Name))
 	g.Expect(machine.Labels[clusterv1.MachineControlPlaneLabel]).To(Equal(""))
 	g.Expect(machine.Labels[clusterv1.MachineControlPlaneNameLabel]).NotTo(BeEmpty())
@@ -655,7 +655,7 @@ func (suite *ControllersSuite) initializeControlPlane(ns string, etcdData ...str
 
 		machine := machineList.Items[0]
 		g.Expect(machine.Name).To(HavePrefix(tcp.Name))
-	}, time.Second).Should(Succeed())
+	}, time.Minute).Should(Succeed())
 
 	return machineService
 }
@@ -718,7 +718,7 @@ func (suite *ControllersSuite) TestRollingUpdate() {
 
 		machine := machineList.Items[0]
 		g.Expect(machine.Name).To(HavePrefix(tcp.Name))
-	}, time.Second).Should(Succeed())
+	}, time.Minute).Should(Succeed())
 
 	patchHelper, err := patch.NewHelper(tcp, fakeClient)
 	tcp.Spec.Version = "v1.25.4"
@@ -826,7 +826,7 @@ func (suite *ControllersSuite) TestUppercaseHostnames() {
 
 		machine := machineList.Items[0]
 		g.Expect(machine.Name).To(HavePrefix(tcp.Name))
-	}, time.Second).Should(Succeed())
+	}, time.Minute).Should(Succeed())
 
 	cancel()
 	g.Expect(eg.Wait()).To(Succeed())

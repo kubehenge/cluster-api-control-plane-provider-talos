@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	cabptv1 "github.com/siderolabs/cluster-api-bootstrap-provider-talos/api/v1alpha3"
+	cabptv1 "github.com/kubehenge/cluster-api-bootstrap-provider-talos/api/v1alpha3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
@@ -332,7 +332,7 @@ func TestTalosControlPlaneTemplateValidateUpdateAllowsMetadataOnlyChanges(t *tes
 
 	updated := obj.DeepCopy()
 	updated.Labels = map[string]string{
-		"example.siderolabs.dev/revision": "2",
+		"example.com/revision": "2",
 	}
 
 	if _, err := updated.ValidateUpdate(context.Background(), obj, updated); err != nil {
@@ -375,7 +375,7 @@ func TestTalosControlPlaneTemplateAllowsClusterClassMachineInfrastructure(t *tes
 					MachineTemplate: TalosControlPlaneTemplateMachineTemplate{
 						ObjectMeta: clusterv1.ObjectMeta{
 							Labels: map[string]string{
-								"example.siderolabs.dev/control-plane": "true",
+								"example.com/control-plane": "true",
 							},
 						},
 					},
@@ -424,7 +424,7 @@ func TestTalosControlPlaneTemplateAllowsClusterClassMachineInfrastructure(t *tes
 	if _, err := tcp.ValidateCreate(context.Background(), tcp); err != nil {
 		t.Fatalf("expected generated TalosControlPlane to validate after machineInfrastructure injection: %v", err)
 	}
-	if got := tcp.Spec.MachineTemplate.ObjectMeta.Labels["example.siderolabs.dev/control-plane"]; got != "true" {
+	if got := tcp.Spec.MachineTemplate.ObjectMeta.Labels["example.com/control-plane"]; got != "true" {
 		t.Fatalf("expected machineTemplate metadata to carry over, got %q", got)
 	}
 }
@@ -436,7 +436,7 @@ func TestStrategicPatchesMustBeStrings(t *testing.T) {
 machineTemplate:
   metadata:
     labels:
-      example.siderolabs.dev/control-plane: "true"
+      example.com/control-plane: "true"
 controlPlaneConfig:
   controlplane:
     generateType: controlplane

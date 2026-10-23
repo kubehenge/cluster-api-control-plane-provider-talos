@@ -12,7 +12,7 @@ import (
 	"sigs.k8s.io/cluster-api/util/conditions"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	controlplanev1 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1beta1"
+	controlplanev1 "github.com/kubehenge/cluster-api-control-plane-provider-talos/api/v1beta1"
 )
 
 func upgrade(t *testing.T, strategy *controlplanev1.RolloutStrategy, replicas int32, names ...string) (*lifecycleEnv, ctrl.Result, error) {

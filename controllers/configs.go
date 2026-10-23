@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"reflect"
 
+	cabptv1 "github.com/kubehenge/cluster-api-bootstrap-provider-talos/api/v1alpha3"
 	"github.com/pkg/errors"
-	cabptv1 "github.com/siderolabs/cluster-api-bootstrap-provider-talos/api/v1alpha3"
 	talosclient "github.com/siderolabs/talos/pkg/machinery/client"
 	talosconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
 	corev1 "k8s.io/api/core/v1"
@@ -19,7 +19,7 @@ import (
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	controlplanev1 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1beta1"
+	controlplanev1 "github.com/kubehenge/cluster-api-control-plane-provider-talos/api/v1beta1"
 )
 
 // talosconfigForMachine will generate a talosconfig that uses *all* found addresses as the endpoints.
@@ -94,11 +94,8 @@ func (r *TalosControlPlaneReconciler) talosconfigForMachines(ctx context.Context
 		}
 	}
 
-	// we don't need to set endpoints in general here, as endpoints were already pre-populated by the CABPT controller
-	// but we use the `machines` to _limit_ access to a specific machine in some places, and we need to be compatible
-	// with talosconfigFromWorkloadCluster which doesn't rely on Machine's Addresses
-	//
-	// once we're done with Sidero and `init` nodes, we can switch to use `WithNodes` and proper Machine IPs
+	// The bootstrap provider already fills the talosconfig's endpoints; they are replaced here so that `machines`
+	// limits which machines answer, as talosconfigFromWorkloadCluster sets them from the workload cluster's nodes.
 	return talosclient.New(ctx,
 		talosclient.WithDefaultGRPCDialOptions(),
 		talosclient.WithEndpoints(addrList...),

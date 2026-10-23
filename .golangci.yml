@@ -56,4 +56,4 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - github.com/siderolabs/cluster-api-control-plane-provider-talos
+        - github.com/kubehenge/cluster-api-control-plane-provider-talos
