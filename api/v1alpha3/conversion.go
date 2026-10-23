@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -89,11 +90,7 @@ func (dst *TalosControlPlane) ConvertFrom(srcRaw conversion.Hub) error {
 	}
 
 	if src.Spec.MachineTemplate.Spec.InfrastructureRef.IsDefined() {
-		infraRef, err := convertToObjectReference(&src.Spec.MachineTemplate.Spec.InfrastructureRef, src.Namespace)
-		if err != nil {
-			return err
-		}
-		dst.Spec.InfrastructureTemplate = *infraRef
+		dst.Spec.InfrastructureTemplate = *convertToObjectReference(&src.Spec.MachineTemplate.Spec.InfrastructureRef, src.Namespace)
 	}
 
 	// Preserve Hub data on down-conversion.
@@ -227,6 +224,11 @@ func convertToContractVersionedObjectReference(ref *corev1.ObjectReference) (*cl
 			return nil, fmt.Errorf("failed to convert object: failed to parse apiVersion: %v", err)
 		}
 		apiGroup = gv.Group
+		// A group without a version is what convertToObjectReference writes when it cannot resolve
+		// the version. API groups of custom resources always contain a dot and versions never do.
+		if apiGroup == "" && strings.Contains(gv.Version, ".") {
+			apiGroup = gv.Version
+		}
 	}
 	return &clusterv1.ContractVersionedObjectReference{
 		APIGroup: apiGroup,
@@ -235,18 +237,21 @@ func convertToContractVersionedObjectReference(ref *corev1.ObjectReference) (*cl
 	}, nil
 }
 
-func convertToObjectReference(ref *clusterv1.ContractVersionedObjectReference, namespace string) (*corev1.ObjectReference, error) {
+func convertToObjectReference(ref *clusterv1.ContractVersionedObjectReference, namespace string) *corev1.ObjectReference {
+	// When the version cannot be resolved, for example because the infrastructure provider is
+	// already gone during a teardown, the reference keeps only its group: failing here would fail
+	// every v1alpha3 read of the object.
 	apiVersion, err := apiVersionGetter(schema.GroupKind{
 		Group: ref.APIGroup,
 		Kind:  ref.Kind,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert object: %v", err)
+		apiVersion = ref.APIGroup
 	}
 	return &corev1.ObjectReference{
 		APIVersion: apiVersion,
 		Kind:       ref.Kind,
 		Namespace:  namespace,
 		Name:       ref.Name,
-	}, nil
+	}
 }
