@@ -1,4 +1,5 @@
-_out
+# Everything the Makefile builds, downloads or renders.
+_out/
 
-# Tilt build files
-.tiltbuild
+# Test binaries from `go test -c`.
+*.test
