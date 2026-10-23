@@ -6,6 +6,7 @@ package controllers
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -14,11 +15,28 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+	"sigs.k8s.io/cluster-api/util/labels/format"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	controlplanev1 "github.com/siderolabs/cluster-api-control-plane-provider-talos/api/v1beta1"
 )
+
+func TestControlPlaneMachineLabelsForClusterFormatsTheControlPlaneName(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{
+		"talos-control-plane",
+		strings.Repeat("talos-control-plane-", 4) + "0",
+	} {
+		tcp := &controlplanev1.TalosControlPlane{ObjectMeta: metav1.ObjectMeta{Name: name}}
+
+		value := controlPlaneMachineLabelsForCluster(tcp, "workload-cluster")[clusterv1.MachineControlPlaneNameLabel]
+		if !format.MustEqualValue(name, value) {
+			t.Fatalf("expected the control plane name label of %q to be formatted as Cluster API does (%q), got %q", name, format.MustFormatValue(name), value)
+		}
+	}
+}
 
 func TestReconcileMachineTemplateStatePropagatesMachineFieldsInPlace(t *testing.T) {
 	t.Parallel()
