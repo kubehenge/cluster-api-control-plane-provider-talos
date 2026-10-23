@@ -25,13 +25,16 @@ func (r *TalosControlPlaneReconciler) upgradeControlPlane(
 ) (ctrl.Result, error) {
 	logger := controlPlane.Logger()
 
-	if tcp.Spec.RolloutStrategy == nil || tcp.Spec.RolloutStrategy.RollingUpdate == nil {
+	if tcp.Spec.RolloutStrategy == nil {
 		return ctrl.Result{}, errors.New("rolloutStrategy is not set")
 	}
 
 	switch tcp.Spec.RolloutStrategy.Type {
 	case controlplanev1.RollingUpdateStrategyType:
-		// RolloutStrategy is currently defaulted and validated to be RollingUpdate
+		if tcp.Spec.RolloutStrategy.RollingUpdate == nil {
+			return ctrl.Result{}, errors.New("rolloutStrategy.rollingUpdate is not set")
+		}
+
 		maxNodes := tcp.Spec.GetReplicas() + int32(tcp.Spec.RolloutStrategy.RollingUpdate.MaxSurge.IntValue())
 		if int32(controlPlane.Machines.Len()) < maxNodes {
 			// the preflight checks of the scale-up hold it until every machine has a node and is healthy
@@ -40,7 +43,12 @@ func (r *TalosControlPlaneReconciler) upgradeControlPlane(
 
 		return r.scaleDownControlPlane(ctx, tcp, controlPlane, machinesRequireUpgrade)
 	case controlplanev1.OnDeleteStrategyType:
-		// nothing to do, scale up handler will take care of creating machines with the new spec
+		// Outdated machines go only when someone deletes them; each one deleted is replaced by a machine
+		// with the new spec, while the others are still outdated.
+		if int32(controlPlane.Machines.Len()) < tcp.Spec.GetReplicas() {
+			return r.scaleUpControlPlane(ctx, cluster, tcp, controlPlane)
+		}
+
 		return ctrl.Result{}, nil
 	default:
 		logger.Info("RolloutStrategy type is not set to RollingUpdateStrategyType, unable to determine the strategy for rolling out machines")
