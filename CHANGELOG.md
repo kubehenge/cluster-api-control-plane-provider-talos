@@ -5,6 +5,8 @@ The changes of each release of this fork. The release pages on GitHub list every
 ## Unreleased
 
 - A control plane machine whose etcd member is still a learner can be deleted and remediated: its own learner no longer blocks the removal of its member, and it no longer counts as a voting member in the quorum check.
+- An etcd member without a name, added by a machine whose etcd never started, no longer blocks scaling, rollouts and deletions for good: the pre-terminate hook removes it by the deleted machine's address, and the etcd member audit removes it once every machine runs a healthy etcd that lists its own member.
+- The etcd member audit removes one member per reconcile, checks that removing a member of a machine that is gone keeps quorum, and no longer stops at the first member it cannot remove.
 
 ## v0.6.0-alpha.2
 

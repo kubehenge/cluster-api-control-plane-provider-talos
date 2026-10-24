@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"slices"
 	"strings"
 	"sync"
@@ -24,6 +25,7 @@ import (
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/cluster-api/util/collections"
 	"sigs.k8s.io/cluster-api/util/conditions"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -45,6 +47,8 @@ type fakeMachineAPI struct {
 
 	// members is the etcd member list every healthy machine reports.
 	members []*machineapi.EtcdMember
+	// viewOf replaces members for the machines whose etcd lists other members.
+	viewOf map[string][]*machineapi.EtcdMember
 	// etcdDown lists the machines whose etcd service is not running.
 	etcdDown map[string]bool
 	// unreachable lists the machines whose Talos API cannot be reached.
@@ -60,6 +64,7 @@ type fakeMachineAPI struct {
 func newFakeMachineAPI(members ...string) *fakeMachineAPI {
 	return &fakeMachineAPI{
 		members:      etcdMembersFor(members...),
+		viewOf:       map[string][]*machineapi.EtcdMember{},
 		etcdDown:     map[string]bool{},
 		unreachable:  map[string]bool{},
 		servicesDown: map[string]bool{},
@@ -99,7 +104,14 @@ func (f *fakeMachineAPI) ProbeEtcd(_ context.Context, _ *controlplanev1.TalosCon
 		return etcdMachineStatus{serviceErr: fmt.Errorf("%s: etcd is not running", machine.Name)}
 	}
 
-	return etcdMachineStatus{members: f.members}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if members, ok := f.viewOf[machine.Name]; ok {
+		return etcdMachineStatus{members: slices.Clone(members)}
+	}
+
+	return etcdMachineStatus{members: slices.Clone(f.members)}
 }
 
 func (f *fakeMachineAPI) LeaveEtcd(_ context.Context, _ *controlplanev1.TalosControlPlane, machine *clusterv1.Machine) error {
@@ -117,7 +129,22 @@ func (f *fakeMachineAPI) RemoveEtcdMember(_ context.Context, _ *controlplanev1.T
 		return f.removeErr
 	}
 
-	f.record(fmt.Sprintf("remove:%s:via=%s", member.Hostname, via.Name))
+	name := member.Hostname
+	if name == "" {
+		name = fmt.Sprintf("#%d", member.Id)
+	}
+
+	f.record(fmt.Sprintf("remove:%s:via=%s", name, via.Name))
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	removed := func(m *machineapi.EtcdMember) bool { return m.Id == member.Id }
+
+	f.members = slices.DeleteFunc(f.members, removed)
+	for machine, members := range f.viewOf {
+		f.viewOf[machine] = slices.DeleteFunc(members, removed)
+	}
 
 	return nil
 }
@@ -144,7 +171,19 @@ func learners(members []*machineapi.EtcdMember, names ...string) []*machineapi.E
 	return members
 }
 
+// unstartedMember returns a learner without a name, as etcd lists the member a machine added before
+// its etcd first started.
+func unstartedMember(id uint64, address string) *machineapi.EtcdMember {
+	return &machineapi.EtcdMember{Id: id, PeerUrls: []string{"https://" + net.JoinHostPort(address, "2380")}, IsLearner: true}
+}
+
 type machineOption func(*clusterv1.Machine)
+
+func withAddress(addressType clusterv1.MachineAddressType, address string) machineOption {
+	return func(m *clusterv1.Machine) {
+		m.Status.Addresses = append(m.Status.Addresses, clusterv1.MachineAddress{Type: addressType, Address: address})
+	}
+}
 
 // flagged marks the machine as a MachineHealthCheck does when it leaves remediation to the owner.
 func flagged(m *clusterv1.Machine) {
@@ -564,6 +603,63 @@ func TestPreTerminateHookRemovesALearnerVictim(t *testing.T) {
 	}
 }
 
+func TestPreTerminateHookRemovesAnUnstartedMemberAtTheVictimsAddress(t *testing.T) {
+	tcp := newLifecycleTCP(3)
+	api := newFakeMachineAPI("b", "c")
+	api.members = append(api.members, unstartedMember(9, "10.0.0.1"))
+	api.etcdDown["a"] = true
+
+	env := newLifecycleEnv(t, api, tcp,
+		newLifecycleMachine(tcp, "a", epoch, hooked, waitingForHook(epoch), withAddress(clusterv1.MachineInternalIP, "10.0.0.1")),
+		newLifecycleMachine(tcp, "b", epoch, hooked, withAddress(clusterv1.MachineInternalIP, "10.0.0.2")),
+		newLifecycleMachine(tcp, "c", epoch, hooked, withAddress(clusterv1.MachineInternalIP, "10.0.0.3")),
+	)
+
+	if _, err := env.hooks(); err != nil {
+		t.Fatal(err)
+	}
+
+	expectCalls(t, api, "remove:#9:via=b")
+
+	if env.hasHook("a") {
+		t.Fatal("the hook was not released after the member was removed")
+	}
+}
+
+func TestPreTerminateHookMatchesAnUnstartedMemberOnlyByTheVictimsOwnAddress(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		victim  string
+		address string
+	}{
+		{name: "another machine's address", victim: "10.0.0.1", address: "10.0.0.2"},
+		{name: "an address another machine reports too", victim: "10.0.0.2", address: "10.0.0.2"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tcp := newLifecycleTCP(3)
+			api := newFakeMachineAPI("b", "c")
+			api.members = append(api.members, unstartedMember(9, tt.address))
+			api.etcdDown["a"] = true
+
+			env := newLifecycleEnv(t, api, tcp,
+				newLifecycleMachine(tcp, "a", epoch, hooked, waitingForHook(epoch), withAddress(clusterv1.MachineInternalIP, tt.victim)),
+				newLifecycleMachine(tcp, "b", epoch, hooked, withAddress(clusterv1.MachineInternalIP, "10.0.0.2")),
+				newLifecycleMachine(tcp, "c", epoch, hooked, withAddress(clusterv1.MachineInternalIP, "10.0.0.3")),
+			)
+
+			if _, err := env.hooks(); err != nil {
+				t.Fatal(err)
+			}
+
+			expectCalls(t, api)
+
+			if env.hasHook("a") {
+				t.Fatal("the hook of a machine without a member was not released")
+			}
+		})
+	}
+}
+
 func TestPreTerminateHookKeepsTheHookWhenEtcdCannotBeInspected(t *testing.T) {
 	tcp := newLifecycleTCP(3)
 	api := newFakeMachineAPI("a", "b", "c")
@@ -824,7 +920,7 @@ func TestCanSafelyRemoveEtcdMember(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got, details := canSafelyRemoveEtcdMember(tt.members, tt.machines[0], tt.machines, tt.healthy)
+			got, details := canSafelyRemoveEtcdMember(tt.members, findEtcdMember(tt.members, tt.machines[0]), tt.machines, tt.healthy)
 			if got != tt.want {
 				t.Fatalf("canSafelyRemoveEtcdMember() = %t (%s), want %t", got, details, tt.want)
 			}
@@ -910,6 +1006,25 @@ func TestRemediationDeletesAFlaggedLearner(t *testing.T) {
 
 	if !env.remediate() {
 		t.Fatal("the flagged machine whose member is a learner was not remediated")
+	}
+
+	env.expectRemediated("b")
+}
+
+func TestRemediationDeletesAFlaggedMachineWithAnUnstartedMember(t *testing.T) {
+	tcp := newLifecycleTCP(3)
+	api := newFakeMachineAPI("a", "c")
+	api.members = append(api.members, unstartedMember(9, "10.0.0.2"))
+	api.etcdDown["b"] = true
+
+	env := newLifecycleEnv(t, api, tcp,
+		newLifecycleMachine(tcp, "a", epoch, withAddress(clusterv1.MachineInternalIP, "10.0.0.1")),
+		newLifecycleMachine(tcp, "b", epoch, flagged, withoutNode, withAddress(clusterv1.MachineInternalIP, "10.0.0.2")),
+		newLifecycleMachine(tcp, "c", epoch, withAddress(clusterv1.MachineInternalIP, "10.0.0.3")),
+	)
+
+	if !env.remediate() {
+		t.Fatal("the flagged machine whose member never started was not remediated")
 	}
 
 	env.expectRemediated("b")
@@ -1369,4 +1484,122 @@ func TestEtcdHealthcheckReportsQuorum(t *testing.T) {
 			}
 		})
 	}
+}
+
+// newAuditEnv returns an environment of three healthy control plane machines a, b and c whose etcd
+// lists their members followed by extra.
+func newAuditEnv(t *testing.T, extra []*machineapi.EtcdMember, opts map[string][]machineOption) *lifecycleEnv {
+	t.Helper()
+
+	tcp := newLifecycleTCP(3)
+	api := newFakeMachineAPI("a", "b", "c")
+	api.members = append(api.members, extra...)
+
+	var machines []*clusterv1.Machine
+	for _, name := range []string{"a", "b", "c"} {
+		machines = append(machines, newLifecycleMachine(tcp, name, epoch, opts[name]...))
+	}
+
+	return newLifecycleEnv(t, api, tcp, machines...)
+}
+
+func (e *lifecycleEnv) reconcileEtcdMembers() (ctrl.Result, error) {
+	return e.r.reconcileEtcdMembers(e.ctx, e.cluster, e.tcp, e.machineList())
+}
+
+func TestAuditEtcdRemovesAnUnstartedMember(t *testing.T) {
+	env := newAuditEnv(t, []*machineapi.EtcdMember{unstartedMember(9, "10.0.0.4")}, nil)
+
+	result, err := env.reconcileEtcdMembers()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expectCalls(t, env.api, "remove:#9:via=a")
+
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("RequeueAfter = %s, want a requeue for the next member", result.RequeueAfter)
+	}
+
+	if !conditions.IsTrue(env.tcp, string(controlplanev1.EtcdClusterHealthyCondition)) {
+		t.Fatal("etcd is not reported healthy once the member is gone")
+	}
+}
+
+func TestAuditEtcdKeepsAnUnstartedMemberAMachineMayOwn(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		api   func(*fakeMachineAPI)
+		opts  map[string][]machineOption
+		extra []*machineapi.EtcdMember
+	}{
+		{
+			name:  "etcd is not running on a machine",
+			extra: []*machineapi.EtcdMember{unstartedMember(9, "10.0.0.4")},
+			api:   func(api *fakeMachineAPI) { api.etcdDown["c"] = true },
+		},
+		{
+			name:  "a machine's etcd does not list the machine's member",
+			extra: []*machineapi.EtcdMember{unstartedMember(9, "10.0.0.4")},
+			api: func(api *fakeMachineAPI) {
+				api.viewOf["c"] = append(etcdMembersFor("a", "b"), unstartedMember(9, "10.0.0.4"))
+			},
+		},
+		{
+			name: "the member list is behind a machine that just started",
+			api: func(api *fakeMachineAPI) {
+				api.viewOf["c"] = slices.Clone(api.members)
+				api.members[2] = &machineapi.EtcdMember{Id: api.members[2].Id, IsLearner: true}
+			},
+		},
+		{
+			name:  "a machine has no node",
+			extra: []*machineapi.EtcdMember{unstartedMember(9, "10.0.0.4")},
+			opts:  map[string][]machineOption{"c": {withoutNode}},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			env := newAuditEnv(t, tt.extra, tt.opts)
+			if tt.api != nil {
+				tt.api(env.api)
+			}
+
+			// the health check that follows reports the member, which is not what this test looks at
+			_, _ = env.reconcileEtcdMembers()
+
+			expectCalls(t, env.api)
+		})
+	}
+}
+
+func TestAuditEtcdRemovesAMemberOfAGoneMachineOnlyWhileQuorumHolds(t *testing.T) {
+	env := newAuditEnv(t, etcdMembersFor("x"), nil)
+	env.api.members[3].Id = 9
+	env.api.etcdDown["c"] = true
+
+	if _, err := env.reconcileEtcdMembers(); err == nil || !strings.Contains(err.Error(), "quorum") {
+		t.Fatalf("reconcileEtcdMembers() = %v, want the removal held for quorum", err)
+	}
+
+	expectCalls(t, env.api)
+
+	env.api.etcdDown["c"] = false
+
+	if _, err := env.reconcileEtcdMembers(); err != nil {
+		t.Fatal(err)
+	}
+
+	expectCalls(t, env.api, "remove:x:via=a")
+}
+
+func TestAuditEtcdRemovesOneMemberAtATime(t *testing.T) {
+	extra := etcdMembersFor("x", "y")
+	extra[0].Id, extra[1].Id = 8, 9
+
+	env := newAuditEnv(t, extra, nil)
+
+	// the health check that follows reports the member still left, which is not what this test looks at
+	_, _ = env.reconcileEtcdMembers()
+
+	expectCalls(t, env.api, "remove:x:via=a")
 }
