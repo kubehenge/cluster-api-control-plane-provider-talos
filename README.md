@@ -97,7 +97,7 @@ kubectl get secret --namespace <namespace> <cluster>-talosconfig -o jsonpath='{.
 
 ### Machine lifecycle
 
-- **Deletion.** Every control plane `Machine` carries the `pre-terminate.delete.hook.machine.cluster.x-k8s.io/tcp-cleanup` hook. When Cluster API has drained a deleted machine and no other pre-terminate hook is left, the machine leaves etcd, or a healthy peer removes its member when its etcd no longer runs. The removal waits while it would cost etcd its quorum or while a member is a learner; the hook is released without touching etcd when the whole cluster goes.
+- **Deletion.** Every control plane `Machine` carries the `pre-terminate.delete.hook.machine.cluster.x-k8s.io/tcp-cleanup` hook. When Cluster API has drained a deleted machine and no other pre-terminate hook is left, the machine leaves etcd, or a healthy peer removes its member when its etcd no longer runs. The removal waits while it would cost etcd its quorum or while another member is a learner; the hook is released without touching etcd when the whole cluster goes.
 - **Remediation.** A machine a MachineHealthCheck marks for remediation by its owner is deleted and replaced, one at a time, never the last one, and only while losing its member keeps etcd quorum. A replacement that fails again is retried at most three times, five minutes apart.
 - **Status.** `Available` is False while the control plane is not initialised, etcd has lost quorum or no machine has a node, and Unknown once the workload cluster has been unreachable for longer than the five minute grace period. A paused Cluster or `TalosControlPlane` reports `Paused` and is left alone.
 

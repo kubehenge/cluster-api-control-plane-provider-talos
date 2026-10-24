@@ -133,6 +133,17 @@ func etcdMembersFor(names ...string) []*machineapi.EtcdMember {
 	return members
 }
 
+// learners marks the members with the host names as learners and returns the members.
+func learners(members []*machineapi.EtcdMember, names ...string) []*machineapi.EtcdMember {
+	for _, member := range members {
+		if slices.Contains(names, member.Hostname) {
+			member.IsLearner = true
+		}
+	}
+
+	return members
+}
+
 type machineOption func(*clusterv1.Machine)
 
 // flagged marks the machine as a MachineHealthCheck does when it leaves remediation to the owner.
@@ -530,6 +541,29 @@ func TestPreTerminateHookHoldsWhileAMemberIsALearner(t *testing.T) {
 	expectCalls(t, api)
 }
 
+func TestPreTerminateHookRemovesALearnerVictim(t *testing.T) {
+	tcp := newLifecycleTCP(3)
+	api := newFakeMachineAPI("a", "b", "c")
+	learners(api.members, "a")
+	api.etcdDown["a"] = true
+
+	env := newLifecycleEnv(t, api, tcp,
+		newLifecycleMachine(tcp, "a", epoch, hooked, waitingForHook(epoch)),
+		newLifecycleMachine(tcp, "b", epoch, hooked),
+		newLifecycleMachine(tcp, "c", epoch, hooked),
+	)
+
+	if _, err := env.hooks(); err != nil {
+		t.Fatal(err)
+	}
+
+	expectCalls(t, api, "remove:a:via=b")
+
+	if env.hasHook("a") {
+		t.Fatal("the hook of a machine whose member is a learner was not released")
+	}
+}
+
 func TestPreTerminateHookKeepsTheHookWhenEtcdCannotBeInspected(t *testing.T) {
 	tcp := newLifecycleTCP(3)
 	api := newFakeMachineAPI("a", "b", "c")
@@ -760,6 +794,34 @@ func TestCanSafelyRemoveEtcdMember(t *testing.T) {
 			healthy:  healthyOnly("b", "c"),
 			want:     true,
 		},
+		{
+			name:     "the target is a learner",
+			members:  learners(etcdMembersFor("a", "b", "c"), "a"),
+			machines: machinesNamed("a", "b", "c"),
+			healthy:  healthyOnly("a", "b", "c"),
+			want:     true,
+		},
+		{
+			name:     "a dead learner target does not count as a voter",
+			members:  learners(etcdMembersFor("a", "b", "c", "d"), "a"),
+			machines: machinesNamed("a", "b", "c", "d"),
+			healthy:  healthyOnly("b", "c"),
+			want:     true,
+		},
+		{
+			name:     "a learner target with the voters short of quorum",
+			members:  learners(etcdMembersFor("a", "b", "c"), "a"),
+			machines: machinesNamed("a", "b", "c"),
+			healthy:  healthyOnly("a", "b"),
+			want:     false,
+		},
+		{
+			name:     "another member is a learner",
+			members:  learners(etcdMembersFor("a", "b", "c", "d"), "d"),
+			machines: machinesNamed("a", "b", "c", "d"),
+			healthy:  healthyOnly("a", "b", "c", "d"),
+			want:     false,
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got, details := canSafelyRemoveEtcdMember(tt.members, tt.machines[0], tt.machines, tt.healthy)
@@ -833,6 +895,24 @@ func TestRemediationDeletesTheFlaggedMachine(t *testing.T) {
 
 	env.expectRemediated("b")
 	expectCalls(t, env.api)
+}
+
+func TestRemediationDeletesAFlaggedLearner(t *testing.T) {
+	tcp := newLifecycleTCP(3)
+	api := newFakeMachineAPI("a", "b", "c")
+	learners(api.members, "b")
+
+	env := newLifecycleEnv(t, api, tcp,
+		newLifecycleMachine(tcp, "a", epoch),
+		newLifecycleMachine(tcp, "b", epoch, flagged),
+		newLifecycleMachine(tcp, "c", epoch),
+	)
+
+	if !env.remediate() {
+		t.Fatal("the flagged machine whose member is a learner was not remediated")
+	}
+
+	env.expectRemediated("b")
 }
 
 func TestRemediationRemovesOnlyOneMachineAtATime(t *testing.T) {

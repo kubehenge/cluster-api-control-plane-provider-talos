@@ -2,6 +2,10 @@
 
 The changes of each release of this fork. The release pages on GitHub list every commit.
 
+## Unreleased
+
+- A control plane machine whose etcd member is still a learner can be deleted and remediated: its own learner no longer blocks the removal of its member, and it no longer counts as a voting member in the quorum check.
+
 ## v0.6.0-alpha.2
 
 - The Go module is now `github.com/kubehenge/cluster-api-control-plane-provider-talos`, and it builds on this fork's bootstrap provider module, `github.com/kubehenge/cluster-api-bootstrap-provider-talos` v0.7.0-alpha.5; code that imports the API types has to change its import paths.

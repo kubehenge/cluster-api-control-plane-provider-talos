@@ -434,9 +434,10 @@ func (r *TalosControlPlaneReconciler) etcdHealthcheck(ctx context.Context, tcp *
 //
 // Removing a member is itself a change that a quorum of the current voting members must commit, and
 // the remaining voting members then need a quorum of their own: in a three member cluster both other
-// members must be healthy, in a five member cluster three of the four others. Learners block the
-// removal until they are promoted. A member matching no machine counts as unhealthy, so anything
-// unknown makes the check stricter.
+// members must be healthy, in a five member cluster three of the four others. Learners other than
+// the target block the removal until they are promoted. A target that is itself a learner has no
+// vote, so removing it leaves the voting members as they are. A member matching no machine counts as
+// unhealthy, so anything unknown makes the check stricter.
 func canSafelyRemoveEtcdMember(members []*machineapi.EtcdMember, target *clusterv1.Machine, machines []*clusterv1.Machine, healthy map[string]bool) (bool, string) {
 	var (
 		learners, remainingVoting, remainingHealthy int
@@ -444,14 +445,15 @@ func canSafelyRemoveEtcdMember(members []*machineapi.EtcdMember, target *cluster
 	)
 
 	for _, member := range members {
-		if member.IsLearner {
-			learners++
+		// The target is matched first: its own member being a learner must not block its removal.
+		if targetMember == nil && etcdMemberMatchesMachine(member, target) {
+			targetMember = member
 
 			continue
 		}
 
-		if targetMember == nil && etcdMemberMatchesMachine(member, target) {
-			targetMember = member
+		if member.IsLearner {
+			learners++
 
 			continue
 		}
@@ -472,7 +474,7 @@ func canSafelyRemoveEtcdMember(members []*machineapi.EtcdMember, target *cluster
 	}
 
 	currentVoting, currentHealthy := remainingVoting, remainingHealthy
-	if targetMember != nil {
+	if targetMember != nil && !targetMember.IsLearner {
 		currentVoting++
 
 		if healthy[target.Name] {
