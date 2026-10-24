@@ -1015,7 +1015,8 @@ func (r *TalosControlPlaneReconciler) reconcileKubeconfig(ctx context.Context, c
 func (r *TalosControlPlaneReconciler) reconcileEtcdMembers(ctx context.Context, cluster *clusterv1.Cluster, tcp *controlplanev1.TalosControlPlane, machines *clusterv1.MachineList) (result ctrl.Result, err error) {
 	var errs error
 	// Audit the etcd member list to remove any nodes that no longer exist
-	if err := r.auditEtcd(ctx, tcp, util.ObjectKey(cluster)); err != nil {
+	removed, err := r.auditEtcd(ctx, tcp, machines.Items)
+	if err != nil {
 		errs = kerrors.NewAggregate([]error{errs, err})
 	}
 
@@ -1037,6 +1038,11 @@ func (r *TalosControlPlaneReconciler) reconcileEtcdMembers(ctx context.Context, 
 
 	if errs != nil {
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, errs
+	}
+
+	// another member that matches no machine is removed in the next pass
+	if removed {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
 	return ctrl.Result{}, nil

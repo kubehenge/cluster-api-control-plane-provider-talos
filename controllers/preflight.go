@@ -105,7 +105,7 @@ func (r *TalosControlPlaneReconciler) preflightChecks(ctx context.Context, tcp *
 
 		for _, member := range status.members {
 			if member.IsLearner {
-				failures = append(failures, fmt.Sprintf("etcd member %q is a learner that has not been promoted yet", member.Hostname))
+				failures = append(failures, fmt.Sprintf("etcd member %q is a learner that has not been promoted yet", etcdMemberName(member)))
 
 				continue
 			}

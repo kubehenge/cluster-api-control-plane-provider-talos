@@ -123,11 +123,11 @@ func (r *TalosControlPlaneReconciler) servicePreTerminateHook(ctx context.Contex
 	case len(owned) <= 1:
 		return r.releasePreTerminateHookWithEvent(ctx, victim, corev1.EventTypeNormal, etcdCleanupSkippedEvent,
 			"Last control plane machine, the etcd member is not removed")
-	case len(nodeNamesForMachine(*victim)) == 0:
-		// A machine that never reported a host name cannot be matched to a member; if it joined etcd
-		// after all, auditEtcd removes the member as an orphan once the Machine is gone.
+	case len(nodeNamesForMachine(*victim)) == 0 && len(machineIPAddresses(victim)) == 0:
+		// A machine that never reported a host name or an address cannot be matched to a member; if it
+		// joined etcd after all, auditEtcd removes the member as an orphan once the Machine is gone.
 		return r.releasePreTerminateHookWithEvent(ctx, victim, corev1.EventTypeNormal, etcdCleanupSkippedEvent,
-			"The machine has no host name to match an etcd member, any member it has is removed as an orphan")
+			"The machine has no host name or address to match an etcd member, any member it has is removed as an orphan")
 	}
 
 	// Unlike KCP's, this never gives up and releases on its own: a Machine held at the hook is visible
@@ -137,13 +137,15 @@ func (r *TalosControlPlaneReconciler) servicePreTerminateHook(ctx context.Contex
 		return ctrl.Result{RequeueAfter: deleteRequeueAfter}, fmt.Errorf("failed to inspect etcd before removing the member of machine %q: %w", victim.Name, err)
 	}
 
+	// A member that cannot be matched, one that got a name the machine does not report, is removed by
+	// auditEtcd once the Machine is gone.
 	if check.member == nil {
 		return r.releasePreTerminateHookWithEvent(ctx, victim, corev1.EventTypeNormal, etcdCleanupSkippedEvent,
 			"The machine is not an etcd member")
 	}
 
 	if !check.safe {
-		message := fmt.Sprintf("Removing etcd member %q could cost etcd its quorum, the deletion waits: %s", check.member.Hostname, check.details)
+		message := fmt.Sprintf("Removing etcd member %q could cost etcd its quorum, the deletion waits: %s", etcdMemberName(check.member), check.details)
 
 		r.Log.Info(message, "machine", victim.Name)
 		r.recordEvent(victim, corev1.EventTypeWarning, etcdQuorumAtRiskEvent, "RemoveEtcdMember", message)
@@ -156,7 +158,7 @@ func (r *TalosControlPlaneReconciler) servicePreTerminateHook(ctx context.Contex
 	}
 
 	result, err := r.releasePreTerminateHookWithEvent(ctx, victim, corev1.EventTypeNormal, etcdMemberRemovedEvent,
-		fmt.Sprintf("etcd member %q left the cluster", check.member.Hostname))
+		fmt.Sprintf("etcd member %q left the cluster", etcdMemberName(check.member)))
 	if err != nil {
 		return result, err
 	}

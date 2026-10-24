@@ -8,6 +8,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -17,7 +19,6 @@ import (
 	talosclient "github.com/siderolabs/talos/pkg/machinery/client"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/cluster-api/util/collections"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	controlplanev1 "github.com/kubehenge/cluster-api-control-plane-provider-talos/api/v1beta1"
 )
@@ -173,7 +174,7 @@ func (m etcdMembership) verify(node string, members []*machineapi.EtcdMember) (m
 		present[name] = struct{}{}
 
 		if _, ok := m.owned[name]; !ok {
-			unmatched = append(unmatched, member.Hostname)
+			unmatched = append(unmatched, etcdMemberName(member))
 		}
 	}
 
@@ -428,42 +429,35 @@ func (r *TalosControlPlaneReconciler) etcdHealthcheck(ctx context.Context, tcp *
 	return health, firstErr
 }
 
-// canSafelyRemoveEtcdMember reports whether the target's etcd member can be removed without losing
-// quorum, as KubeadmControlPlane's targetEtcdClusterHealthy does. healthy tells which machines run a
-// healthy etcd service.
+// canSafelyRemoveEtcdMember reports whether the target etcd member can be removed without losing
+// quorum, as KubeadmControlPlane's targetEtcdClusterHealthy does. target is nil when the machine to
+// remove has no member. healthy tells which machines run a healthy etcd service.
 //
 // Removing a member is itself a change that a quorum of the current voting members must commit, and
 // the remaining voting members then need a quorum of their own: in a three member cluster both other
-// members must be healthy, in a five member cluster three of the four others. Learners block the
-// removal until they are promoted. A member matching no machine counts as unhealthy, so anything
-// unknown makes the check stricter.
-func canSafelyRemoveEtcdMember(members []*machineapi.EtcdMember, target *clusterv1.Machine, machines []*clusterv1.Machine, healthy map[string]bool) (bool, string) {
-	var (
-		learners, remainingVoting, remainingHealthy int
-		targetMember                                *machineapi.EtcdMember
-	)
+// members must be healthy, in a five member cluster three of the four others. Learners other than
+// the target block the removal until they are promoted. A target that is itself a learner has no
+// vote, so removing it leaves the voting members as they are. A member matching no machine counts as
+// unhealthy, so anything unknown makes the check stricter.
+func canSafelyRemoveEtcdMember(members []*machineapi.EtcdMember, target *machineapi.EtcdMember, machines []*clusterv1.Machine, healthy map[string]bool) (bool, string) {
+	var learners, remainingVoting, remainingHealthy int
 
 	for _, member := range members {
+		// The target is skipped first: its own member being a learner must not block its removal.
+		if target != nil && member.Id == target.Id {
+			continue
+		}
+
 		if member.IsLearner {
 			learners++
 
 			continue
 		}
 
-		if targetMember == nil && etcdMemberMatchesMachine(member, target) {
-			targetMember = member
-
-			continue
-		}
-
 		remainingVoting++
 
-		for _, m := range machines {
-			if m.Name != target.Name && healthy[m.Name] && etcdMemberMatchesMachine(member, m) {
-				remainingHealthy++
-
-				break
-			}
+		if etcdMemberHealthy(member, machines, healthy) {
+			remainingHealthy++
 		}
 	}
 
@@ -472,10 +466,10 @@ func canSafelyRemoveEtcdMember(members []*machineapi.EtcdMember, target *cluster
 	}
 
 	currentVoting, currentHealthy := remainingVoting, remainingHealthy
-	if targetMember != nil {
+	if target != nil && !target.IsLearner {
 		currentVoting++
 
-		if healthy[target.Name] {
+		if etcdMemberHealthy(target, machines, healthy) {
 			currentHealthy++
 		}
 	}
@@ -489,6 +483,13 @@ func canSafelyRemoveEtcdMember(members []*machineapi.EtcdMember, target *cluster
 	}
 
 	return true, fmt.Sprintf("%d of the %d remaining etcd members are healthy", remainingHealthy, remainingVoting)
+}
+
+// etcdMemberHealthy reports whether the member runs on one of the machines whose etcd is healthy.
+func etcdMemberHealthy(member *machineapi.EtcdMember, machines []*clusterv1.Machine, healthy map[string]bool) bool {
+	return slices.ContainsFunc(machines, func(m *clusterv1.Machine) bool {
+		return healthy[m.Name] && etcdMemberMatchesMachine(member, m)
+	})
 }
 
 // etcdQuorumCheck is what the probes of the control plane machines tell about removing the target's
@@ -546,9 +547,87 @@ func (r *TalosControlPlaneReconciler) checkEtcdMemberRemoval(ctx context.Context
 	}
 
 	check.member = findEtcdMember(members, target)
-	check.safe, check.details = canSafelyRemoveEtcdMember(members, target, machines, healthy)
+	if check.member == nil {
+		check.member = findUnstartedEtcdMember(members, target, machines)
+	}
+
+	check.safe, check.details = canSafelyRemoveEtcdMember(members, check.member, machines, healthy)
 
 	return check, nil
+}
+
+// findUnstartedEtcdMember returns the member without a name that the machine added, matched by its
+// peer URL, or nil if there is none. A member gets its name only once its etcd first starts, so the
+// member of a machine that joined etcd and failed before then can only be told by the address it was
+// added with. The machine keeps its addresses until its infrastructure is deleted, after the
+// pre-terminate hook; an address that another machine reports as well is not used.
+func findUnstartedEtcdMember(members []*machineapi.EtcdMember, machine *clusterv1.Machine, machines []*clusterv1.Machine) *machineapi.EtcdMember {
+	addresses := map[netip.Addr]struct{}{}
+
+	for _, address := range machineIPAddresses(machine) {
+		addresses[address] = struct{}{}
+	}
+
+	for _, m := range machines {
+		if m.Name == machine.Name {
+			continue
+		}
+
+		for _, address := range machineIPAddresses(m) {
+			delete(addresses, address)
+		}
+	}
+
+	for _, member := range members {
+		if member.Hostname != "" {
+			continue
+		}
+
+		for _, peerURL := range member.PeerUrls {
+			u, err := url.Parse(peerURL)
+			if err != nil {
+				continue
+			}
+
+			address, err := netip.ParseAddr(u.Hostname())
+			if err != nil {
+				continue
+			}
+
+			if _, ok := addresses[address.Unmap()]; ok {
+				return member
+			}
+		}
+	}
+
+	return nil
+}
+
+// machineIPAddresses returns the internal and external IP addresses the machine reports.
+func machineIPAddresses(machine *clusterv1.Machine) []netip.Addr {
+	var addresses []netip.Addr
+
+	for _, address := range machine.Status.Addresses {
+		if address.Type != clusterv1.MachineInternalIP && address.Type != clusterv1.MachineExternalIP {
+			continue
+		}
+
+		if ip, err := netip.ParseAddr(address.Address); err == nil {
+			addresses = append(addresses, ip.Unmap())
+		}
+	}
+
+	return addresses
+}
+
+// etcdMemberName returns the host name of the member, or its ID for a member whose etcd has not
+// started yet and so has no name.
+func etcdMemberName(member *machineapi.EtcdMember) string {
+	if member.Hostname != "" {
+		return member.Hostname
+	}
+
+	return fmt.Sprintf("%x (no name yet)", member.Id)
 }
 
 // removeEtcdMember removes the target's etcd member: it asks the target to leave, which also forfeits
@@ -611,7 +690,7 @@ func (r *TalosControlPlaneReconciler) gracefulEtcdLeave(ctx context.Context, c *
 // forceEtcdLeave removes an etcd member by telling another control plane node to remove it, for a
 // member whose machine cannot leave by itself.
 func (r *TalosControlPlaneReconciler) forceEtcdLeave(ctx context.Context, c *talosclient.Client, member *machineapi.EtcdMember) error {
-	r.Log.Info("removing etcd member", "memberName", member.Hostname, "memberId", member.Id)
+	r.Log.Info("removing etcd member", "memberName", etcdMemberName(member), "memberId", member.Id)
 
 	return c.EtcdRemoveMemberByID(
 		ctx,
@@ -621,79 +700,142 @@ func (r *TalosControlPlaneReconciler) forceEtcdLeave(ctx context.Context, c *tal
 	)
 }
 
-// auditEtcd removes the etcd members that match no control plane machine, as seen by the first machine
-// that is not being deleted. It does nothing while any machine has no noderef: a new machine's member
-// cannot be matched by name yet and would be taken for an orphan.
-func (r *TalosControlPlaneReconciler) auditEtcd(ctx context.Context, tcp *controlplanev1.TalosControlPlane, cluster client.ObjectKey) error {
-	ctx, cancel := context.WithTimeout(ctx, etcdCallTimeout)
-
-	defer cancel()
-
-	machines, err := r.getControlPlaneMachinesForCluster(ctx, cluster)
-	if err != nil {
-		return err
+// auditEtcd removes an etcd member that matches no control plane machine by name, at most one per
+// call as etcd takes one membership change at a time, and reports whether it removed one. It does
+// nothing while any machine has no noderef: a new machine's member cannot be matched by name yet and
+// would be taken for an orphan.
+//
+// A member with a name belonged to a machine that is gone. Removing it must keep quorum, as at the
+// pre-terminate hook; a learner has no vote, so it can always go. A member without a name was added
+// by a machine whose etcd never started, or is still starting. It is removed only once every machine
+// that is not being deleted runs a healthy etcd that lists the machine's own named member, and it is
+// none of those members: then no machine that stays can still own it. This is proved by each
+// machine's own state, so unlike KubeadmControlPlane no grace period is needed.
+func (r *TalosControlPlaneReconciler) auditEtcd(ctx context.Context, tcp *controlplanev1.TalosControlPlane, ownedMachines []clusterv1.Machine) (bool, error) {
+	if len(ownedMachines) == 0 {
+		return false, nil
 	}
 
-	if len(machines.Items) == 0 {
-		return nil
-	}
-
-	for _, machine := range machines.Items {
+	for _, machine := range ownedMachines {
 		if !machine.Status.NodeRef.IsDefined() {
-			return fmt.Errorf("some CP machines do not have a noderef")
+			return false, fmt.Errorf("some CP machines do not have a noderef")
 		}
 	}
 
-	var designatedCPMachine clusterv1.Machine
-
-	for _, machine := range machines.Items {
-		if !machine.DeletionTimestamp.IsZero() {
-			continue
-		}
-
-		designatedCPMachine = machine
-
-		break
+	remaining := remainingMachines(ownedMachines)
+	if len(remaining) == 0 {
+		return false, fmt.Errorf("no CP machine which is not being deleted")
 	}
 
-	if designatedCPMachine.Name == "" {
-		return fmt.Errorf("no CP machine which is not being deleted and has node ref")
+	machines := make([]*clusterv1.Machine, 0, len(remaining))
+	for i := range remaining {
+		machines = append(machines, &remaining[i])
 	}
 
-	c, err := r.talosconfigForMachines(ctx, tcp, designatedCPMachine)
+	members, via, err := r.listEtcdMembers(ctx, tcp, machines)
 	if err != nil {
-		return err
-	}
-
-	defer c.Close() //nolint:errcheck
-
-	response, err := c.EtcdMemberList(ctx, &machineapi.EtcdMemberListRequest{})
-	if err != nil {
-		return fmt.Errorf("error getting etcd members via %q (endpoints %v): %w", designatedCPMachine.Name, c.GetConfigContext().Endpoints, err)
-	}
-
-	if len(response.GetMessages()) == 0 {
-		return fmt.Errorf("empty etcd member list response via %q", designatedCPMachine.Name)
+		return false, err
 	}
 
 	// every member must carry a host name of one of the machines, matched the same way the health check does
-	owned := etcdMemberNames(machines.Items)
+	owned := etcdMemberNames(ownedMachines)
 
-	for _, member := range response.Messages[0].Members {
-		if member.Hostname == "" {
-			return fmt.Errorf("discovered etcd member with empty hostname: %s", member)
-		}
+	var orphans []*machineapi.EtcdMember
 
-		if _, present := owned[strings.ToLower(member.Hostname)]; present {
-			continue
-		}
-
-		r.Log.Info("found etcd member that doesn't exist as controlplane machine", "member", member)
-
-		if err = r.forceEtcdLeave(ctx, c, member); err != nil {
-			return fmt.Errorf("error leaving etcd for member %q via machine %q: %w", member, designatedCPMachine.Name, err)
+	for _, member := range members {
+		if _, present := owned[strings.ToLower(member.Hostname)]; !present {
+			orphans = append(orphans, member)
 		}
 	}
 
-	return nil
+	if len(orphans) == 0 {
+		return false, nil
+	}
+
+	statuses := r.probeEtcdMachines(ctx, tcp, machines)
+
+	healthy := make(map[string]bool, len(statuses))
+	for name, status := range statuses {
+		healthy[name] = status.healthy()
+	}
+
+	started, notStarted := startedEtcdMembers(machines, statuses)
+
+	var errs []error
+
+	for _, member := range orphans {
+		name := etcdMemberName(member)
+
+		if member.Hostname == "" {
+			if notStarted != nil {
+				r.Log.Info("keeping an etcd member without a name while a control plane machine may still own it", "member", name, "reason", notStarted.Error())
+
+				continue
+			}
+
+			// a member list that is behind may not have the name of a member that just started yet
+			if _, own := started[member.Id]; own {
+				continue
+			}
+		}
+
+		if !member.IsLearner {
+			if safe, details := canSafelyRemoveEtcdMember(members, member, machines, healthy); !safe {
+				errs = append(errs, fmt.Errorf("etcd member %q matches no control plane machine, but removing it could cost etcd its quorum: %s", name, details))
+
+				continue
+			}
+		}
+
+		r.Log.Info("removing an etcd member that matches no control plane machine", "member", name, "via", via.Name)
+
+		if err := r.talosAPI().RemoveEtcdMember(ctx, tcp, via, member); err != nil {
+			return false, fmt.Errorf("error removing etcd member %q via machine %q: %w", name, via.Name, err)
+		}
+
+		return true, nil
+	}
+
+	return false, errors.Join(errs...)
+}
+
+// listEtcdMembers returns the etcd members as the first machine with a healthy etcd lists them, and
+// that machine.
+func (r *TalosControlPlaneReconciler) listEtcdMembers(ctx context.Context, tcp *controlplanev1.TalosControlPlane, machines []*clusterv1.Machine) ([]*machineapi.EtcdMember, *clusterv1.Machine, error) {
+	api := r.talosAPI()
+	errs := make([]error, 0, len(machines))
+
+	for _, machine := range machines {
+		status := api.ProbeEtcd(ctx, tcp, machine)
+		if status.healthy() {
+			return status.members, machine, nil
+		}
+
+		errs = append(errs, status.err())
+	}
+
+	return nil, nil, fmt.Errorf("no healthy etcd member to list the etcd members from: %w", errors.Join(errs...))
+}
+
+// startedEtcdMembers returns the IDs of the machines' own etcd members, each taken from the member list
+// of the machine's own etcd. It returns an error when a machine does not run a healthy etcd that lists
+// a named member of the machine: its etcd may still be starting, with a member that has no name yet.
+func startedEtcdMembers(machines []*clusterv1.Machine, statuses map[string]etcdMachineStatus) (map[uint64]struct{}, error) {
+	ids := make(map[uint64]struct{}, len(machines))
+
+	for _, machine := range machines {
+		status := statuses[machine.Name]
+		if !status.healthy() {
+			return nil, status.err()
+		}
+
+		member := findEtcdMember(status.members, machine)
+		if member == nil {
+			return nil, fmt.Errorf("%s: etcd does not list a member of the machine", machine.Name)
+		}
+
+		ids[member.Id] = struct{}{}
+	}
+
+	return ids, nil
 }
