@@ -143,7 +143,7 @@ make image KO_FLAGS=--push=false TAG=dev
 ## Credits
 
 This provider was created by [Sidero Labs](https://www.siderolabs.com/), who keep the original at [siderolabs/cluster-api-control-plane-provider-talos](https://github.com/siderolabs/cluster-api-control-plane-provider-talos).
-The Cluster API v1beta2 port builds on their open pull request for it, and the machine lifecycle and remediation build on the work in the community forks of Nick Atkins and Pip Oomen.
+Some community fixes are pulled in from open pull requests and forks.
 [CHANGELOG.md](CHANGELOG.md) lists the changes of this fork's releases and links the history of the Sidero Labs releases.
 
 ## Licence
