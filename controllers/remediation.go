@@ -190,7 +190,14 @@ func (r *TalosControlPlaneReconciler) reconcileUnhealthyMachines(
 		return ctrl.Result{}, false, nil
 	}
 
-	data, reason, message := checkRemediationRetryLimits(target, now, log)
+	outdated, err := r.remediationTargetOutdated(ctx, cluster, tcp, target)
+	if err != nil {
+		setOwnerRemediated(clusterv1.InternalErrorReason, "Failed to compare the machine with the control plane configuration, please check controller logs for errors")
+
+		return ctrl.Result{}, false, err
+	}
+
+	data, reason, message := checkRemediationRetryLimits(target, outdated, now, log)
 	if reason != "" {
 		setOwnerRemediated(reason, message)
 
@@ -479,21 +486,41 @@ func machineToBeRemediated(machines []*clusterv1.Machine) *clusterv1.Machine {
 	return candidates[0]
 }
 
+// remediationTargetOutdated reports whether the target no longer matches the TalosControlPlane's
+// configuration. Only the retry limits of a Machine that replaced a remediated one depend on it, so it
+// is looked up for no other Machine.
+func (r *TalosControlPlaneReconciler) remediationTargetOutdated(ctx context.Context, cluster *clusterv1.Cluster, tcp *controlplanev1.TalosControlPlane, target *clusterv1.Machine) (bool, error) {
+	if _, retry := target.Annotations[remediationForAnnotation]; !retry {
+		return false, nil
+	}
+
+	controlPlane, err := newControlPlane(ctx, r.Client, cluster, tcp, collections.FromMachines(target))
+	if err != nil {
+		return false, fmt.Errorf("failed to compare control plane machine %s with the control plane configuration: %w", target.Name, err)
+	}
+
+	return controlPlane.MachinesWithOutdatedRolloutSpec().Has(target), nil
+}
+
 // checkRemediationRetryLimits returns the remediation data to record for the target, or the reason and
 // message why the retry limits do not allow remediating it now.
 //
-// Remediating a Machine that replaced a Machine remediated less than remediationMinHealthyPeriod ago is a
-// retry of that remediation: it waits for remediationRetryPeriod after the previous one, and stops after
-// remediationMaxRetry retries, so that a Machine that always fails (a quota, a broken template) is not
-// replaced forever.
-func checkRemediationRetryLimits(target *clusterv1.Machine, now time.Time, log logr.Logger) (data *remediationData, reason, message string) {
+// Remediating a Machine that replaced a remediated Machine and became unhealthy less than
+// remediationMinHealthyPeriod after that remediation is a retry of it: it waits for
+// remediationRetryPeriod after the previous one, and stops after remediationMaxRetry retries, so that
+// a Machine that always fails (a quota, a broken template) is not replaced forever. The limits hold
+// for as long as the Machine stays unhealthy, however long ago the previous remediation was.
+//
+// An outdated target starts a new sequence, as its replacement is created from a different
+// configuration: a fixed template must be able to replace a Machine that used up its retries.
+func checkRemediationRetryLimits(target *clusterv1.Machine, outdated bool, now time.Time, log logr.Logger) (data *remediationData, reason, message string) {
 	data = &remediationData{
 		Machine:   target.Name,
 		Timestamp: metav1.Time{Time: now},
 	}
 
 	value, ok := target.Annotations[remediationForAnnotation]
-	if !ok {
+	if !ok || outdated {
 		return data, "", ""
 	}
 
@@ -504,7 +531,12 @@ func checkRemediationRetryLimits(target *clusterv1.Machine, now time.Time, log l
 		return data, "", ""
 	}
 
-	if !last.Timestamp.Add(remediationMinHealthyPeriod).After(now) {
+	unhealthySince := now
+	if c := conditions.Get(target, clusterv1.MachineHealthCheckSucceededCondition); c != nil && c.Status == metav1.ConditionFalse && !c.LastTransitionTime.IsZero() {
+		unhealthySince = c.LastTransitionTime.Time
+	}
+
+	if !unhealthySince.Before(last.Timestamp.Add(remediationMinHealthyPeriod)) {
 		return data, "", ""
 	}
 

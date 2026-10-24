@@ -18,8 +18,12 @@ import (
 	"github.com/go-logr/logr/testr"
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
@@ -191,6 +195,18 @@ func flagged(m *clusterv1.Machine) {
 	conditions.Set(m, metav1.Condition{Type: clusterv1.ReadyCondition, Status: metav1.ConditionFalse, Reason: clusterv1.NotReadyReason})
 }
 
+// unhealthySince marks the machine as failing its MachineHealthCheck since the time.
+func unhealthySince(at time.Time) machineOption {
+	return func(m *clusterv1.Machine) {
+		conditions.Set(m, metav1.Condition{
+			Type:               clusterv1.MachineHealthCheckSucceededCondition,
+			Status:             metav1.ConditionFalse,
+			Reason:             clusterv1.MachineHealthCheckNodeDeletedReason,
+			LastTransitionTime: metav1.NewTime(at),
+		})
+	}
+}
+
 func withoutNode(m *clusterv1.Machine) {
 	m.Status.NodeRef = clusterv1.MachineNodeReference{}
 }
@@ -278,11 +294,13 @@ func newLifecycleEnv(t *testing.T, api *fakeMachineAPI, tcp *controlplanev1.Talo
 	t.Helper()
 
 	scheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{clusterv1.AddToScheme, controlplanev1.AddToScheme, corev1.AddToScheme} {
+	for _, add := range []func(*runtime.Scheme) error{clusterv1.AddToScheme, controlplanev1.AddToScheme, corev1.AddToScheme, apiextensionsv1.AddToScheme} {
 		if err := add(scheme); err != nil {
 			t.Fatal(err)
 		}
 	}
+
+	scheme.AddKnownTypeWithName(testInfraMachineGVK, &unstructured.Unstructured{})
 
 	objs := []client.Object{tcp}
 	for _, m := range machines {
@@ -1055,6 +1073,94 @@ func TestRemediationRemovesOnlyOneMachineAtATime(t *testing.T) {
 	}
 }
 
+// testInfraMachineGVK is the kind of the infrastructure machines that tests comparing a Machine with
+// the control plane's infrastructure template create.
+var testInfraMachineGVK = schema.GroupVersionKind{Group: "infrastructure.cluster.x-k8s.io", Version: "v1alpha1", Kind: "ProxmoxMachine"}
+
+// withInfraMachine creates the infrastructure machine of the machine, cloned from the template, and
+// the CRD that makes its kind resolvable.
+func (e *lifecycleEnv) withInfraMachine(m *clusterv1.Machine, template string) {
+	e.t.Helper()
+
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "proxmoxmachines.infrastructure.cluster.x-k8s.io",
+			Labels: map[string]string{clusterv1.GroupVersion.String(): testInfraMachineGVK.Version},
+		},
+	}
+	if err := e.client.Create(e.ctx, crd); err != nil && !apierrors.IsAlreadyExists(err) {
+		e.t.Fatal(err)
+	}
+
+	infraMachine := &unstructured.Unstructured{}
+	infraMachine.SetGroupVersionKind(testInfraMachineGVK)
+	infraMachine.SetNamespace(m.Namespace)
+	infraMachine.SetName(m.Name)
+	infraMachine.SetAnnotations(map[string]string{
+		clusterv1.TemplateClonedFromNameAnnotation:      template,
+		clusterv1.TemplateClonedFromGroupKindAnnotation: "ProxmoxMachineTemplate.infrastructure.cluster.x-k8s.io",
+	})
+
+	if err := e.client.Create(e.ctx, infraMachine); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+func TestRemediationOfAnOutdatedMachineStartsANewSequence(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		template   string
+		remediated bool
+	}{
+		{name: "the template changed", template: "fixed", remediated: true},
+		{name: "the template is the same", template: "broken"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tcp := newLifecycleTCP(3)
+			tcp.Spec.Version = "v1.37.1"
+			tcp.Spec.MachineTemplate.Spec.InfrastructureRef = clusterv1.ContractVersionedObjectReference{
+				APIGroup: testInfraMachineGVK.Group, Kind: "ProxmoxMachineTemplate", Name: tt.template,
+			}
+
+			// the previous remediation used up the retries ten minutes ago
+			last, err := (&remediationData{Machine: "old", Timestamp: metav1.NewTime(time.Now().Add(-10 * time.Minute)), RetryCount: remediationMaxRetry}).marshal()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			target := newLifecycleMachine(tcp, "b", epoch, flagged, withAnnotation(remediationForAnnotation, last), func(m *clusterv1.Machine) {
+				m.Spec.Version = tcp.Spec.Version
+				m.Spec.InfrastructureRef = clusterv1.ContractVersionedObjectReference{APIGroup: testInfraMachineGVK.Group, Kind: testInfraMachineGVK.Kind, Name: m.Name}
+			})
+
+			env := newLifecycleEnv(t, newFakeMachineAPI("a", "b", "c"), tcp,
+				newLifecycleMachine(tcp, "a", epoch), target, newLifecycleMachine(tcp, "c", epoch))
+			env.withInfraMachine(target, "broken")
+
+			if remediated := env.remediate(); remediated != tt.remediated {
+				t.Fatalf("remediated = %t, want %t", remediated, tt.remediated)
+			}
+
+			if !tt.remediated {
+				env.expectNotRemediated("b", clusterv1.MachineSetMachineCannotBeRemediatedReason, "already failed")
+
+				return
+			}
+
+			env.expectRemediated("b")
+
+			stored := &controlplanev1.TalosControlPlane{}
+			if err := env.client.Get(env.ctx, client.ObjectKeyFromObject(tcp), stored); err != nil {
+				t.Fatal(err)
+			}
+
+			if data, err := remediationDataFromAnnotation(stored.Annotations[remediationInProgressAnnotation]); err != nil || data.RetryCount != 0 {
+				t.Fatalf("stored remediation record = %v (%v), want a new sequence", data, err)
+			}
+		})
+	}
+}
+
 func TestRemediationRefusesToLoseQuorum(t *testing.T) {
 	tcp := newLifecycleTCP(3)
 	api := newFakeMachineAPI("a", "b", "c")
@@ -1175,14 +1281,44 @@ func TestRemediationRetryLimits(t *testing.T) {
 	for _, tt := range []struct {
 		name       string
 		annotation string
-		reason     string
-		retries    int
+		// unhealthySince is when MachineHealthCheckSucceeded turned False, unset while it is True
+		unhealthySince time.Time
+		outdated       bool
+		reason         string
+		retries        int
 	}{
 		{name: "first remediation"},
 		{name: "replacement healthy long enough", annotation: record(now.Add(-2*time.Hour), 3)},
 		{name: "too soon after the previous one", annotation: record(now.Add(-time.Minute), 0), reason: clusterv1.MachineSetMachineRemediationDeferredReason},
 		{name: "a retry", annotation: record(now.Add(-10*time.Minute), 1), retries: 2},
 		{name: "out of retries", annotation: record(now.Add(-10*time.Minute), remediationMaxRetry), reason: clusterv1.MachineSetMachineCannotBeRemediatedReason},
+		{
+			name:           "out of retries and unhealthy ever since, after the healthy period",
+			annotation:     record(now.Add(-2*time.Hour), remediationMaxRetry),
+			unhealthySince: now.Add(-110 * time.Minute),
+			reason:         clusterv1.MachineSetMachineCannotBeRemediatedReason,
+		},
+		{
+			name:           "a retry of a machine unhealthy since before the healthy period ended",
+			annotation:     record(now.Add(-2*time.Hour), 1),
+			unhealthySince: now.Add(-90 * time.Minute),
+			retries:        2,
+		},
+		{
+			name:           "unhealthy only after the healthy period",
+			annotation:     record(now.Add(-2*time.Hour), remediationMaxRetry),
+			unhealthySince: now.Add(-30 * time.Minute),
+		},
+		{
+			name:       "out of retries, but outdated",
+			annotation: record(now.Add(-10*time.Minute), remediationMaxRetry),
+			outdated:   true,
+		},
+		{
+			name:       "too soon after the previous one, but outdated",
+			annotation: record(now.Add(-time.Minute), 1),
+			outdated:   true,
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			target := newLifecycleMachine(newLifecycleTCP(3), "a", epoch)
@@ -1190,7 +1326,11 @@ func TestRemediationRetryLimits(t *testing.T) {
 				withAnnotation(remediationForAnnotation, tt.annotation)(target)
 			}
 
-			data, reason, _ := checkRemediationRetryLimits(target, now, testr.New(t))
+			if !tt.unhealthySince.IsZero() {
+				unhealthySince(tt.unhealthySince)(target)
+			}
+
+			data, reason, _ := checkRemediationRetryLimits(target, tt.outdated, now, testr.New(t))
 			if reason != tt.reason {
 				t.Fatalf("reason = %q, want %q", reason, tt.reason)
 			}
