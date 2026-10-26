@@ -2,6 +2,10 @@
 
 The changes of each release of this fork. The release pages on GitHub list every commit.
 
+## v0.6.0
+
+The first final release of this fork. The controller is the one of v0.6.0-alpha.3, built on this fork's bootstrap provider module v0.7.0.
+
 ## v0.6.0-alpha.3
 
 - A control plane machine whose etcd member is still a learner can be deleted and remediated: its own learner no longer blocks the removal of its member, and it no longer counts as a voting member in the quorum check.
